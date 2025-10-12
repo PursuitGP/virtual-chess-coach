@@ -1,0 +1,3 @@
+/* Extra tweaks for chessboard theme to match the dark UI */
+.cg-wrap { border-radius: 12px; overflow: hidden; }
+.cg-board { border-radius: 12px; }
