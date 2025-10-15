@@ -1,3 +1,28 @@
-/* Extra tweaks for chessboard theme to match the dark UI */
-.cg-wrap { border-radius: 12px; overflow: hidden; }
-.cg-board { border-radius: 12px; }
+/* layout / sizing */
+.container.wide { max-width: 1200px; margin: 0 auto; }
+.grid.grid-2 { display: grid; grid-template-columns: 1fr 360px; gap: 20px; }
+@media (max-width: 1100px) {
+  .grid.grid-2 { grid-template-columns: 1fr; }
+}
+
+/* size control slider */
+.size-control { display:flex; align-items:center; gap:10px; margin-left: auto; }
+.size-control label { font-size: 12px; color: #9ca3af; }
+
+/* moves table */
+.moves-table { width: 100%; border-collapse: collapse; }
+.moves-table .mv-num { width: 36px; color: #9ca3af; text-align: right; padding-right: 8px; }
+.moves-table .mv-san { padding: 2px 6px; }
+
+/* right panel header */
+.panel-header { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+.panel-meta { text-align: right; }
+
+/* carryover styles from earlier */
+.history { max-height: 260px; overflow-y: auto; background: #0b1220; border: 1px solid #1f2937; border-radius: 10px; padding: 6px 12px; }
+.history ol { padding-left: 18px; }
+.badge { display:inline-flex; align-items:center; gap:6px; background:#0b1220; border:1px solid #1f2937; border-radius:9999px; padding:6px 10px; font-size:12px; color:#cbd5e1; }
+.small { font-size: 12px; color: #9ca3af; }
+.pgn-upload { margin: 8px 0; }
+.pgn-meta { font-size: 14px; color: #cbd5e1; margin: 6px 0 10px; }
+.error { color: #ef4444; background: #1f2937; padding: 6px; border-radius: 6px; font-size: 13px; }
