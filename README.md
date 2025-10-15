@@ -11,10 +11,14 @@ npm start
 
 ## Features
 
-- Drag & drop with legal move restrictions
-- Programmatic example button (e2→e4)
-- Flip board
-- Reset to start
-- Shows FEN and SAN move history
-- Correct CSS import path for chessground: `import 'chessground/assets/chessground.css'`
+Drag-and-drop chessboard with legal move validation
 
+Upload .pgn files to replay classic games move by move
+
+FEN + move history tracking
+
+Flip, reset, and step-through controls
+
+Responsive board size adjustment
+
+Toggle PGN normalization for compatibility
