@@ -1,0 +1,10 @@
+[Event "Test"]
+[Site "?"]
+[Date "2025.10.14"]
+[Round "1"]
+[White "White"]
+[Black "Black"]
+[Result "0-1"]
+[ECO "A02"]
+
+1.f3 e5 2.g4 Qh4# 0-1
