@@ -12,9 +12,11 @@ npm start
 ## Features
 
 - Drag & drop with legal move restrictions
-- Programmatic example button (e2→e4)
 - Flip board
 - Reset to start
 - Shows FEN and SAN move history
-- Correct CSS import path for chessground: `import 'chessground/assets/chessground.css'`
+- PGN Parsing and Uploads
+- PGN Normalization
+- Click to Drag Arrows
+  
 
