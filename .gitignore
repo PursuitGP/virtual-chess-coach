@@ -51,3 +51,7 @@ Thumbs.db
 # ----------------------------
 # You can add any sensitive config or API keys you don't want in Git
 .env
+# ----------------------------
+# Node.js
+# ----------------------------
+node_modules/
