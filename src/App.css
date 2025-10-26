@@ -26,3 +26,105 @@
 .pgn-upload { margin: 8px 0; }
 .pgn-meta { font-size: 14px; color: #cbd5e1; margin: 6px 0 10px; }
 .error { color: #ef4444; background: #1f2937; padding: 6px; border-radius: 6px; font-size: 13px; }
+
+/* Coach sidebar */
+.coach-card .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-left: 6px;
+    background: #3a4153; /* idle */
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.06) inset;
+}
+
+    .coach-card .status-dot.ok {
+        background: #5bd16a;
+    }
+
+    .coach-card .status-dot.busy {
+        background: #f2c14e;
+        animation: coach-blink 1s infinite ease-in-out;
+    }
+
+    .coach-card .status-dot.err {
+        background: #ff6b6b;
+    }
+
+@keyframes coach-blink {
+    0%,100% {
+        opacity: 0.6;
+    }
+
+    50% {
+        opacity: 1;
+    }
+}
+
+.coach-skeleton .sk-line {
+    height: 12px;
+    border-radius: 6px;
+    margin: 8px 0;
+    background: linear-gradient(90deg, rgba(255,255,255,0.06), rgba(255,255,255,0.12), rgba(255,255,255,0.06));
+    background-size: 200% 100%;
+    animation: sk-shimmer 1.2s linear infinite;
+}
+
+    .coach-skeleton .sk-line.short {
+        width: 60%;
+    }
+
+@keyframes sk-shimmer {
+    0% {
+        background-position: 200% 0;
+    }
+
+    100% {
+        background-position: -200% 0;
+    }
+}
+
+.coach-result .coach-row {
+    display: grid;
+    grid-template-columns: 84px 1fr;
+    gap: 8px;
+    align-items: start;
+    margin: 8px 0;
+}
+
+.pill {
+    display: inline-block;
+    font-size: 0.8rem;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #232635;
+    color: #e7e9ee;
+    border: 1px solid #2a2f42;
+    text-align: center;
+}
+
+.coach-list {
+    margin: 0;
+    padding-left: 18px;
+}
+
+.coach-error {
+    border: 1px solid #3b1f26;
+    background: #201317;
+    color: #ffd2d2;
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 0.95rem;
+}
+
+.coach-payload pre {
+    margin: 8px 0 0 0;
+    padding: 10px;
+    overflow: auto;
+    background: #0f1320;
+    border-radius: 8px;
+    border: 1px solid #2a2f42;
+}
+
+
+
+
