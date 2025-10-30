@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+﻿import React, { useState } from "react";
 import { Chess } from "chess.js";
 
 /**
@@ -7,6 +7,7 @@ import { Chess } from "chess.js";
  * - Ultra-compat normalization + preview
  */
 export default function PGNLoader({ onParsed }) {
+  const [showNormalized, setShowNormalized] = useState(true);
   const [error, setError] = useState("");
   const [headers, setHeaders] = useState(null);
   const [normalizedText, setNormalizedText] = useState("");
@@ -170,32 +171,102 @@ export default function PGNLoader({ onParsed }) {
       }
     };
     reader.readAsText(file);
-  }
+    }
+
+    // --- Copy PGN helper ---
+    const [copied, setCopied] = useState(false);
+
+    function handleCopyPGN() {
+        const text = normalizedText;            // <-- use your real state name
+        if (!text) return;
+
+        // Modern clipboard API first
+        if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(text)
+                .then(() => {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1500);
+                })
+                .catch(fallbackCopy);
+        } else {
+            fallbackCopy();
+        }
+
+        function fallbackCopy() {
+            try {
+                const ta = document.createElement("textarea");
+                ta.value = text;
+                ta.style.position = "fixed";
+                ta.style.opacity = "0";
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand("copy");
+                document.body.removeChild(ta);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+            } catch (err) {
+                console.error("Clipboard copy failed:", err);
+                alert("Could not copy PGN to clipboard.");
+            }
+        }
+    }
+
+
 
   return (
     <div>
       <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:12}}>
      
-        <label style={{display:'flex', alignItems:'center', gap:6, fontSize:14}}>
-          <input type="checkbox" checked={normalize} onChange={(e)=>setNormalize(e.target.checked)} />
-          Toggle Normalize
-        </label>
+     
       </div>
 
       <input type="file" accept=".pgn" onChange={handleFile} className="pgn-upload" />
 
       {error && <p className="error">{error}</p>}
 
-      
+          {/* Normalized PGN Section */}
+          <div style={{ marginTop: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <label style={{ fontWeight: 500 }}>Normalized PGN</label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <button
+                          className="btn ghost"
+                          onClick={() => setShowNormalized(s => !s)}
+                          title={showNormalized ? "Hide preview" : "Show preview"}
+                      >
+                          {showNormalized ? "▾ Hide" : "▸ Show"}
+                      </button>
+                      <button
+                          className={`btn ${copied ? "copied" : ""}`}
+                          onClick={handleCopyPGN}
+                          title="Copy to clipboard"
+                          disabled={!normalizedText}
+                      >
+                          {copied ? "✔ Copied!" : "📋 Copy"}
+                      </button>
+                  </div>
+              </div>
 
-      {normalize && normalizedText && (
-        <details style={{marginTop:8}}>
-          <summary className="small">Show normalized PGN preview</summary>
-          <pre style={{whiteSpace:'pre-wrap', background:'#0b1220', border:'1px solid #1f2937', padding:8, borderRadius:8, marginTop:6}}>
-{normalizedText}
-          </pre>
-        </details>
-      )}
+              {showNormalized && (
+                  <textarea
+                      id="normalizedPGN"
+                      readOnly
+                      value={normalizedText}
+                      style={{
+                          width: "100%",
+                          height: 140,
+                          marginTop: 6,
+                          resize: "vertical",
+                          fontFamily: "ui-monospace, monospace",
+                      }}
+                  />
+              )}
+          </div>
+
+
+
+
+      
     </div>
   );
 }
