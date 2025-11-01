@@ -53,6 +53,9 @@ export default function App() {
   const [pgnMoves, setPgnMoves] = useState([]); // verbose
   const [plyIndex, setPlyIndex] = useState(0);
 
+  //Eval
+   const [evaluation, setEvaluation] = useState(0);
+
   // Board size (px)
   const [boardSize, setBoardSize] = useState(600);
 
@@ -75,15 +78,24 @@ export default function App() {
   }
 
   function onMove(from, to) {
-    applyMove(from, to);
+  const gameCopy = new Chess(game.fen());
+  const move = gameCopy.move({ from, to, promotion: "q" });
+  if (move) {
+    setLastMove([from, to]);
+    syncFrom(gameCopy);
+    analyzePosition(gameCopy.fen()); // ask backend for eval after each move
   }
+}
+
 
   function resetBoard() {
     const fresh = new Chess();
-    setLastMove(null);
-    setPlyIndex(0);
     syncFrom(fresh);
-  }
+    setPlyIndex(0);
+    setLastMove(null);
+    setEvaluation(0); // reset the eval bar
+}
+
 
   function flipBoard() {
     setOrientation(o => (o === "white" ? "black" : "white"));
@@ -94,9 +106,12 @@ export default function App() {
     setPgnHeaders(headers || {});
     setPgnMoves(Array.isArray(moves) ? moves : []);
     setPlyIndex(0);
+
     const fresh = new Chess();
     setLastMove(null);
     syncFrom(fresh);
+    setEvaluation(0);
+    analyzePosition(fresh.fen());
   }
 
   function stepTo(index) {
@@ -109,6 +124,7 @@ export default function App() {
     setLastMove(target > 0 ? [pgnMoves[target - 1].from, pgnMoves[target - 1].to] : null);
     setPlyIndex(target);
     syncFrom(replay);
+    analyzePosition(replay.fen())
     }
 
     useEffect(() => {
@@ -155,8 +171,33 @@ export default function App() {
     }, [prevPly, nextPly, goToStart, goToEnd, resetBoard, flipBoard]);
 
 
-    function nextPly() { safeStepTo(plyIndex + 1); }
-    function prevPly() { safeStepTo(plyIndex - 1); }
+    function nextPly() {
+  if (plyIndex < pgnMoves.length) {
+    const newPly = plyIndex + 1;
+    const replay = new Chess();
+    for(let i = 0; i < newPly; i++) {
+      replay.move(pgnMoves[i]);
+    }
+    syncFrom(replay);
+    setPlyIndex(newPly);
+    analyzePosition(replay.fen());
+  }
+}
+
+   // function prevPly() { safeStepTo(plyIndex - 1); }
+   function prevPly() {
+  if (plyIndex > 0) {
+    const newPly = plyIndex - 1;
+    const replay = new Chess();
+    for (let i = 0; i < newPly; i++) {
+      replay.move(pgnMoves[i]);
+    }
+    syncFrom(replay);
+    setPlyIndex(newPly);
+    analyzePosition(replay.fen()); // ✅ update eval
+  }
+}
+
 
     function goToStart() { safeStepTo(0); }
     function goToEnd() { safeStepTo(pgnMoves.length); }
@@ -188,6 +229,55 @@ export default function App() {
             headers: pgnHeaders || {},  // Event, Site, White, Black, etc.
         };
     }, [fen, displayHistory, plyIndex, pgnHeaders]);
+
+    //Stockfish//
+
+    async function analyzePosition(currentFen) {
+  try {
+    const res = await fetch("http://127.0.0.1:5000/api/coach", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fen: currentFen }),
+    });
+
+    const data = await res.json();
+    if (data.error) {
+      console.error("Backend error:", data.error);
+      
+      return;
+    }
+
+    // Convert eval string (“+0.32” or “Mate in 3”) to a numeric bar value
+    let evalValue = 0;
+    if (data.eval && data.eval.includes("Mate")) {
+      evalValue = data.eval.includes("-") ? -10 : 10; // strong mate indication
+    } else if (data.eval) {
+      evalValue = parseFloat(data.eval);
+      if(Math.abs(evalValue) > 10) evalValue = evalValue / 100; // convert centipawns to pawns
+    }
+
+    setEvaluation(evalValue);
+    console.log("Eval:", evalValue, "Best move:", data.best_move);
+  } catch (err) {
+    console.error("Error calling backend:", err);
+  }
+}
+
+      async function updateEvaluation(fen) {
+        try {
+          const res = await fetch("http://127.0.0.1:5000/api/coach", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ fen })
+          });
+          const data = await res.json();
+          if (data.eval) setEvaluation(parseFloat(data.eval));
+        } catch (err) {
+          console.error("Eval fetch failed:", err);
+      }
+    }
+
+
 
     async function handleAskCoach() {
         setCoachOpen(true);
@@ -229,7 +319,8 @@ export default function App() {
 
     return (
 
-    <div className="container wide">
+    <div
+     className="container wide">
       <h1 style={{ marginBottom: 12 }}>♜ Chess Coach - Chessgrounds w/ PGN Parsing</h1>
 
       <div className="badge" style={{ marginBottom: 12 }}>
@@ -282,21 +373,77 @@ export default function App() {
                         <span><kbd className="kbd">F</kbd> flip</span>
                     </div>
 
+                    {/* Evaluation Bar + Board */}
+                    <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: "5px",
+                          marginTop: "16px",
+                        }}
+                    >
+                    {/* Evaluation Bar */}
+                    <div
+                      className="eval-bar-container"
+                        style={{
+                          height: `${boardSize}px`,
+                          width: "40px",
+                          background: "#000",
+                          borderRadius: "4px",
+                          position: "relative",
+                          overflow: "hidden",
+                        }}
+                    >
+                    <div
+                      className="eval-bar-fill"
+                        style={{
+                          position: "absolute",
+                          bottom: 0,
+                          width: "100%",
+                          background: "#fff",
+                          height: `${Math.min(100, Math.max(0, 50 + evaluation * 5))}%`,
+                          transition: "height 0.3s ease",
+                        }}
+                      ></div>
+                      
 
-          <Chessground
-            width={boardSize}
-            height={boardSize}
-            orientation={orientation}
-            fen={fen}
-            turnColor={turnColor}
-            lastMove={lastMove}
-            animation={{ enabled: true, duration: 200 }}
-            highlight={{ lastMove: true, check: true }}
-            draggable={{ enabled: true }}
-            movable={{ free: false, color: "both", dests, showDests: true }}
-            onMove={onMove}
-          />
-        </div>
+                    <div
+                        style={{
+                          position: "absolute",
+                          top: `${100 - Math.min(100, Math.max(0, 50 + evaluation * 5))}%`,
+                          width: "100%",
+                          fontSize: "15px",
+                          textAlign: "center",
+                          fontWeight: "bold",
+                          //color: evaluation > 0 ? "#000000ff" : "#fff",
+                          color: "#000000ff",
+                          textShadow: "0 0 4px rgba(0, 0, 0, 0)",
+                        }}
+                      >
+                        {evaluation > 0 ? `+${evaluation.toFixed(2)}` : evaluation.toFixed(2)}
+                      </div>
+                    </div>
+
+        {/* Chessboard */}
+        <Chessground
+          width={boardSize}
+          height={boardSize}
+          orientation={orientation}
+          fen={fen}
+          turnColor={turnColor}
+          lastMove={lastMove}
+          animation={{ enabled: true, duration: 200 }}
+          highlight={{ lastMove: true, check: true }}
+          draggable={{ enabled: true }}
+          movable={{ free: false, color: "both", dests, showDests: true }}
+          onMove={onMove}
+        />
+      </div>
+
+
+    </div>
+
 
         <div className="card">
           <div className="panel-header">
