@@ -25,12 +25,32 @@ env/
 ENV/
 
 # ----------------------------
+# Node.js / React
+# ----------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.cache/
+coverage/
+*.tgz
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# React build artifacts
+frontend/build/
+frontend/node_modules/
+*.lock
+
+# ----------------------------
 # IDE / Editor
 # ----------------------------
-# VS Code
 .vscode/
-# PyCharm
 .idea/
+*.iml
 
 # ----------------------------
 # OS generated files
@@ -49,9 +69,4 @@ Thumbs.db
 # ----------------------------
 # Misc
 # ----------------------------
-# You can add any sensitive config or API keys you don't want in Git
 .env
-# ----------------------------
-# Node.js
-# ----------------------------
-

@@ -5,6 +5,16 @@
   .grid.grid-2 { grid-template-columns: 1fr; }
 }
 
+/*eval bar*/
+.eval-bar-container {
+  border: 1px solid #888;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.eval-bar-fill {
+  transition: height 0.3s ease;
+}
+
 /* size control slider */
 .size-control { display:flex; align-items:center; gap:10px; margin-left: auto; }
 .size-control label { font-size: 12px; color: #9ca3af; }
@@ -123,8 +133,8 @@
     background: #0f1320;
     border-radius: 8px;
     border: 1px solid #2a2f42;
+    
 }
-
-
-
-
+.eval-bar-container {
+  border: 1px solid #090000;
+}
