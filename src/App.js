@@ -7,6 +7,20 @@ import "./App.css";
 import { Chess } from "chess.js";
 import PGNLoader from "./PGNLoader";
 import { useEffect } from "react";
+import { Line } from "react-chartjs-2";
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  LineElement,
+  PointElement,
+  Tooltip,
+  Legend
+} from "chart.js";
+import annotationPlugin from "chartjs-plugin-annotation";
+
+ChartJS.register(CategoryScale, LinearScale, LineElement, PointElement, Tooltip, Legend, annotationPlugin);
+
 
 const FILES = ["a","b","c","d","e","f","g","h"];
 const RANKS = ["1","2","3","4","5","6","7","8"];
@@ -47,6 +61,7 @@ export default function App() {
   const [orientation, setOrientation] = useState("white");
   const [lastMove, setLastMove] = useState(null);
   const [displayHistory, setDisplayHistory] = useState([]); // SAN tokens
+  
 
   // PGN state
   const [pgnHeaders, setPgnHeaders] = useState(null);
@@ -55,6 +70,8 @@ export default function App() {
 
   //Eval
    const [evaluation, setEvaluation] = useState(0);
+   const [allEvaluations, setAllEvaluations] = useState([]);
+
 
   // Board size (px)
   const [boardSize, setBoardSize] = useState(600);
@@ -83,7 +100,7 @@ export default function App() {
   if (move) {
     setLastMove([from, to]);
     syncFrom(gameCopy);
-    analyzePosition(gameCopy.fen()); // ask backend for eval after each move
+    //analyzePosition(gameCopy.fen()); // ask backend for eval after each move
   }
 }
 
@@ -101,31 +118,46 @@ export default function App() {
     setOrientation(o => (o === "white" ? "black" : "white"));
   }
 
-  // ---- PGN integration ----
-  function onPGNParsed({ headers, moves }) {
-    setPgnHeaders(headers || {});
-    setPgnMoves(Array.isArray(moves) ? moves : []);
-    setPlyIndex(0);
 
-    const fresh = new Chess();
-    setLastMove(null);
-    syncFrom(fresh);
-    setEvaluation(0);
-    analyzePosition(fresh.fen());
-  }
 
-  function stepTo(index) {
-    const target = Math.max(0, Math.min(index, pgnMoves.length));
-    const replay = new Chess();
-    for (let i = 0; i < target; i++) {
-      const m = pgnMoves[i];
-      replay.move({ from: m.from, to: m.to, promotion: m.promotion || "q" });
-    }
-    setLastMove(target > 0 ? [pgnMoves[target - 1].from, pgnMoves[target - 1].to] : null);
-    setPlyIndex(target);
-    syncFrom(replay);
-    analyzePosition(replay.fen())
-    }
+ function stepTo(index) {
+  const target = Math.max(0, Math.min(index, pgnMoves.length));
+  const replay = new Chess();
+  for (let i = 0; i < target; i++) replay.move(pgnMoves[i]);
+
+  setLastMove(target > 0 ? [pgnMoves[target - 1].from, pgnMoves[target - 1].to] : null);
+  setPlyIndex(target);
+  syncFrom(replay);
+
+  // ✅ Use precomputed evaluation instead of re-calling backend
+  const evalForMove = allEvaluations[target - 1];
+  if (evalForMove) setEvaluation(evalForMove.score);
+}// classify each move by drop severity (in pawn units)
+// --- Review Graph Computation ---
+
+const iconForColor = (color) => {
+  if (color === "#00ff00") return "✅";   // good move
+  if (color === "#ffd700") return "❓";   // inaccuracy
+  if (color === "#ff8c00") return "?!";   // mistake
+  if (color === "#ff0000") return "❌";   // blunder
+  return "";
+};
+const points = useMemo(() => {
+  return allEvaluations.map((e, i) => {
+    if (i === 0) return { x: i + 1, y: e.score, color: "#00ff00" }; // start
+    const prev = allEvaluations[i - 1]?.score ?? 0;
+    const delta = e.score - prev;
+    const drop = Math.abs(delta);
+
+    let color = "#00ff00"; // green: good move
+    if (drop > 0.5 && drop <= 1.5) color = "#ffd700"; // yellow: inaccuracy
+    else if (drop > 1.5 && drop <= 3.0) color = "#ff8c00"; // orange: mistake
+    else if (drop > 3.0) color = "#ff0000"; // red: blunder
+
+    return { x: i + 1, y: e.score, color };
+  });
+}, [allEvaluations]);
+
 
     useEffect(() => {
         const isTyping = (el) => {
@@ -171,7 +203,7 @@ export default function App() {
     }, [prevPly, nextPly, goToStart, goToEnd, resetBoard, flipBoard]);
 
 
-    function nextPly() {
+  /*  function nextPly() {
   if (plyIndex < pgnMoves.length) {
     const newPly = plyIndex + 1;
     const replay = new Chess();
@@ -180,7 +212,7 @@ export default function App() {
     }
     syncFrom(replay);
     setPlyIndex(newPly);
-    analyzePosition(replay.fen());
+   // analyzePosition(replay.fen());
   }
 }
 
@@ -201,6 +233,11 @@ export default function App() {
 
     function goToStart() { safeStepTo(0); }
     function goToEnd() { safeStepTo(pgnMoves.length); }
+*/
+    function nextPly() { stepTo(plyIndex + 1); }
+    function prevPly() { stepTo(plyIndex - 1); }
+    function goToStart() { stepTo(0); }
+    function goToEnd() { stepTo(pgnMoves.length); }
 
     const movePairs = sanToPairs(displayHistory);
 
@@ -217,6 +254,67 @@ export default function App() {
     const [coachData, setCoachData] = React.useState(null);
     const [coachError, setCoachError] = React.useState(null);
 
+    const chartData = {
+  datasets: [
+    {
+      label: "Evaluation",
+      data: points,
+      borderColor: "#ffffff",
+      borderWidth: 2,
+      tension: 0.3,
+      fill: {
+        target: "origin",
+        above: "rgba(255,255,255,0.15)",
+        below: "rgba(0,0,0,0.25)"
+      },
+      pointRadius: 5,
+      pointBackgroundColor: points.map(p => p.color)
+    }
+  ]
+};
+
+const chartOptions = useMemo(() => ({
+  animation: { duration: 400 },
+  scales: {
+    x: {
+      type: "linear",
+      min: 1,
+      max: allEvaluations.length,
+      grid: { display: false },
+      title: { display: true, text: "Moves" },
+      ticks: {
+        color: "#ccc",
+        stepSize: 2, // show fewer tick marks
+      },
+    },
+    y: {
+      min: -10,
+      max: 10,
+      grid: { color: "rgba(255,255,255,0.1)" },
+      ticks: { color: "#ccc" },
+    },
+  },
+  plugins: {
+    legend: { display: false },
+    annotation: {
+      annotations: {
+        current: {
+          type: "line",
+          xMin: plyIndex + 1,
+          xMax: plyIndex + 1,
+          borderColor: "cyan",
+          borderWidth: 2,
+        },
+      },
+    },
+  },
+  responsive: true,
+  maintainAspectRatio: false,
+}), [allEvaluations.length, plyIndex]);
+
+
+
+
     // Build the payload we’ll send (FEN + SAN history up to current ply)
     const coachPayload = React.useMemo(() => {
         const movesSoFar = Array.isArray(displayHistory)
@@ -230,9 +328,48 @@ export default function App() {
         };
     }, [fen, displayHistory, plyIndex, pgnHeaders]);
 
-    //Stockfish//
+    //Backend//
+
+
+  const [isEvaluating, setIsEvaluating] = useState(false);
+
+
+async function onPGNParsed({ headers, moves, file }) {
+  setIsEvaluating(true);
+  setPgnHeaders(headers || {});
+  setPgnMoves(Array.isArray(moves) ? moves : []);
+  setPlyIndex(0);
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const res = await fetch("http://127.0.0.1:5000/api/evaluate_pgn", {
+      method: "POST",
+      body: formData,
+    });
+    const data = await res.json();
+
+    if (data.evaluations) {
+      // ✅ Store full evaluation list for instant replay
+      setAllEvaluations(data.evaluations);
+      setEvaluation(data.evaluations[0]?.score || 0);
+
+      // preload board
+      const fresh = new Chess();
+      syncFrom(fresh);
+    } else {
+      console.error("No evaluations returned:", data);
+    }
+  } catch (err) {
+    console.error("Error uploading PGN:", err);
+  } finally {
+    setIsEvaluating(false);
+  }
+}
 
     async function analyzePosition(currentFen) {
+  setCoachLoading(true);
   try {
     const res = await fetch("http://127.0.0.1:5000/api/coach", {
       method: "POST",
@@ -243,25 +380,29 @@ export default function App() {
     const data = await res.json();
     if (data.error) {
       console.error("Backend error:", data.error);
-      
       return;
     }
 
-    // Convert eval string (“+0.32” or “Mate in 3”) to a numeric bar value
+    // Convert eval string to numeric bar value
     let evalValue = 0;
     if (data.eval && data.eval.includes("Mate")) {
-      evalValue = data.eval.includes("-") ? -10 : 10; // strong mate indication
+      evalValue = data.eval.includes("-") ? -10 : 10;
     } else if (data.eval) {
       evalValue = parseFloat(data.eval);
-      if(Math.abs(evalValue) > 10) evalValue = evalValue / 100; // convert centipawns to pawns
+      if (Math.abs(evalValue) > 10) evalValue = evalValue / 100;
     }
 
+    // Smooth transition to new evaluation value
     setEvaluation(evalValue);
+
     console.log("Eval:", evalValue, "Best move:", data.best_move);
   } catch (err) {
     console.error("Error calling backend:", err);
+  } finally {
+    setCoachLoading(false);
   }
 }
+
 
       async function updateEvaluation(fen) {
         try {
@@ -352,7 +493,7 @@ export default function App() {
                                 onChange={(e) => setBoardSize(Number(e.target.value))}
                             />
                         </div>
-                    </div>
+                                </div>
 
                    {/* Shortcut guide */}
                     <div
@@ -438,8 +579,22 @@ export default function App() {
           draggable={{ enabled: true }}
           movable={{ free: false, color: "both", dests, showDests: true }}
           onMove={onMove}
+          
         />
       </div>
+      <div style={{ height: 160, marginTop: 12, background: "#222", borderRadius: 6, padding: "6px" }}>
+  {allEvaluations.length ? (
+    <Line data={chartData} options={chartOptions} />
+  ) : (
+    <p className="small" style={{ textAlign: "center", color: "#888" }}>
+      Load a PGN to see evaluation review graph
+    </p>
+  )}
+</div>
+
+
+
+
 
 
     </div>
@@ -462,6 +617,13 @@ export default function App() {
           </div>
 
           <PGNLoader onParsed={onPGNParsed} />
+          {isEvaluating && (
+             <p style={{ color: "orange" }}>🔄 Evaluating entire PGN... please wait.</p>
+            )}
+            
+          {!isEvaluating && allEvaluations.length > 0 && (
+            <p style={{ color: "green" }}>✅ PGN fully evaluated!</p>
+            )}
 
           <div style={{ marginTop: 12 }}>
             <label>Current FEN</label>
