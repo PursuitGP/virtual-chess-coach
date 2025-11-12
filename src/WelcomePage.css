@@ -1,0 +1,110 @@
+.welcome-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  width: 100%;
+  background: linear-gradient(135deg, #b3ecff, #66b2ff, #3399ff); /* 🌊 Light ocean blue gradient */
+  color: #002244;
+  overflow: hidden;
+}
+
+
+.welcome-card {
+  background: rgba(197, 176, 176, 0); /* translucent glassy card */
+  border: 1px solid rgba(16, 61, 106, 0.3);
+  color: #104981;
+  border-radius: 16px;
+  padding: 32px 40px;
+  box-shadow: 0 10px 24px rgba(0, 60, 88, 0.3);
+  max-width: 520px;
+  width: 90%;
+  text-align: center;
+  animation: fadeInUp 1s ease;
+}
+
+.welcome-title {
+  font-size: 1.8rem;
+  margin-bottom: 0.5rem;
+}
+
+.welcome-subtitle {
+  font-size: 1rem;
+  color: #081324;
+  margin-bottom: 1.5rem;
+}
+
+.welcome-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.welcome-label {
+  font-size: 0.9rem;
+  text-align: left;
+  color: #060709;
+}
+
+.welcome-input,
+.welcome-textarea {
+  width: 100%;
+  background: #e5e7eb;
+  color: #9a9c9e;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  padding: 10px;
+  font-size: 0.95rem;
+  resize: vertical;
+}
+
+.welcome-textarea {
+  min-height: 100px;
+}
+
+.welcome-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.btn {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn.primary {
+  background: #2563eb;
+  color: rgb(236, 228, 228);
+  font-weight: 600;
+}
+
+.btn.primary:hover {
+  background: #1e45b3;
+}
+
+.btn.ghost {
+  background: transparent;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+}
+
+.btn.ghost:hover {
+  background: #232f43;
+}
+
+/* Entry animation */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
