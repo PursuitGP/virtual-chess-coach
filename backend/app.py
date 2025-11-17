@@ -12,7 +12,22 @@ from motifs import detect_motifs
 app = Flask(__name__)
 CORS(app)
 
-STOCKFISH_PATH = "/opt/homebrew/bin/stockfish" if os.path.exists("/opt/homebrew/bin/stockfish") else "stockfish"
+# Detect platform and choose correct Stockfish binary path
+if os.name == "nt":  
+    # WINDOWS
+    STOCKFISH_PATH = os.path.join(os.path.dirname(__file__), "stockfish", "stockfish.exe")
+
+elif os.path.exists("/opt/homebrew/bin/stockfish"):
+    # MAC (M1/M2)
+    STOCKFISH_PATH = "/opt/homebrew/bin/stockfish"
+
+elif os.path.exists("/usr/bin/stockfish"):
+    # LINUX
+    STOCKFISH_PATH = "/usr/bin/stockfish"
+
+else:
+    raise FileNotFoundError("Could not find Stockfish binary for your system.")
+
 
 executor = ThreadPoolExecutor(max_workers=2)
 
