@@ -462,7 +462,7 @@ async function onPGNParsed({ headers, moves, file }) {
 
     <div
      className="container wide">
-      <h1 style={{ marginBottom: 12 }}>♜ Chess Coach - Chessgrounds w/ PGN Parsing</h1>
+      <h1 style={{ marginBottom: 12 }}>♜ Virtual Chess Coach=</h1>
 
       <div className="badge" style={{ marginBottom: 12 }}>
         <span>Turn:&nbsp;</span><strong>{turnColor === "white" ? "White" : "Black"}</strong>
