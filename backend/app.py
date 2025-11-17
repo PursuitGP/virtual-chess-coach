@@ -6,6 +6,8 @@ from stockfish import Stockfish
 import os
 from multiprocessing import Pool, cpu_count
 from concurrent.futures import ThreadPoolExecutor
+from motifs import detect_motifs
+
 
 app = Flask(__name__)
 CORS(app)
@@ -43,7 +45,6 @@ def evaluate_fen(fen):
 
 @app.route("/api/evaluate_pgn", methods=["POST"])
 def evaluate_pgn():
-    """Accepts uploaded PGN file and returns full evaluation pipeline in parallel."""
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
@@ -59,17 +60,41 @@ def evaluate_pgn():
             board.push(move)
             fens.append(board.fen())
 
-        # Evaluate multiple FENs concurrently
+        # Run stockfish evals in parallel
         with Pool(processes=max(1, cpu_count() - 1)) as pool:
             results = pool.map(evaluate_fen, fens)
 
+        # Add move numbers
         for i, r in enumerate(results):
             r["move_number"] = i + 1
+
+        # ----------------------------------------
+        # 🟦 NEW: Motif detection integration
+        # ----------------------------------------
+        prev_eval = None
+        for i, r in enumerate(results):
+            fen = r["fen"]
+            numeric_eval = r["score"] * 100  # convert back to cp for consistency
+
+            board.set_fen(fen)
+
+            motifs = detect_motifs(
+                board,
+                move_number=i + 1,
+                eval=numeric_eval,
+                prev_eval=prev_eval
+            )
+
+            r["motifs"] = motifs
+            r["eval_delta"] = None if prev_eval is None else numeric_eval - prev_eval
+            prev_eval = numeric_eval
+        # ----------------------------------------
 
         return jsonify({"count": len(results), "evaluations": results})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/coach", methods=["POST"])
 def analyze_position():
