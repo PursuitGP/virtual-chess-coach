@@ -164,7 +164,7 @@ export default function PGNLoader({ onParsed }) {
         const { headers: hdrs, moves } = tryParseCompat(cleaned);
         setHeaders(hdrs);
         setError("");
-        onParsed && onParsed({ headers: hdrs, moves, raw: cleaned });
+        onParsed && onParsed({ headers: hdrs, moves, file, raw: cleaned });
       } catch (err) {
         console.error("PGN parse error (final):", err);
         setError(err?.message || "Could not parse PGN.");
