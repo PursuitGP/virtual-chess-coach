@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 app = Flask(__name__)
 CORS(app)
 
-STOCKFISH_PATH = os.path.join(os.path.dirname(__file__), "stockfish", "stockfish.exe")
+STOCKFISH_PATH = "/opt/homebrew/bin/stockfish" if os.path.exists("/opt/homebrew/bin/stockfish") else "stockfish"
 
 executor = ThreadPoolExecutor(max_workers=2)
 
