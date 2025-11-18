@@ -62,6 +62,10 @@ export default function App() {
   const [lastMove, setLastMove] = useState(null);
   const [displayHistory, setDisplayHistory] = useState([]); // SAN tokens
   
+  //Gemini
+  const [geminiLoading, setGeminiLoading] = useState(false);
+  const [geminiSummary, setGeminiSummary] = useState("");
+  const [geminiError, setGeminiError] = useState(null);
 
   // PGN state
   const [pgnHeaders, setPgnHeaders] = useState(null);
@@ -352,7 +356,9 @@ async function onPGNParsed({ headers, moves, file }) {
 
     if (data.evaluations) {
       // ✅ Store full evaluation list for instant replay
-      setAllEvaluations(data.evaluations);
+      setAllEvaluations(data.evaluations);   // <-- REQUIRED for graph + progression
+      askGemini(data.evaluations);           // optional auto-run
+      
       setEvaluation(data.evaluations[0]?.score || 0);
 
       // preload board
@@ -419,6 +425,44 @@ async function onPGNParsed({ headers, moves, file }) {
     }
 
 
+    async function askGemini(evaluations) {
+        const res = await fetch("http://127.0.0.1:5000/api/gemini_summary", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ evaluations }),
+        });
+
+        const data = await res.json();
+        console.log("Gemini analysis:", data.analysis);
+      }
+      async function handleGeminiSummary() {
+        setGeminiLoading(true);
+        setGeminiSummary("");
+        setGeminiError(null);
+
+        try {
+          const res = await fetch("http://127.0.0.1:5000/api/gemini_summary", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              evaluations: allEvaluations,
+            }),
+          });
+
+          const data = await res.json();
+
+          if (data.error) {
+            setGeminiError(data.error);
+          } else {
+            setGeminiSummary(data.analysis);
+          }
+        } catch (err) {
+          setGeminiError("Could not reach Gemini backend");
+        }
+
+        setGeminiLoading(false);
+      }
+
 
     async function handleAskCoach() {
         setCoachOpen(true);
@@ -473,6 +517,14 @@ async function onPGNParsed({ headers, moves, file }) {
                 <div className="card">
                     {/* Control Dashboard */}
                     <div className="controls">
+                        <button
+                          className="btn"
+                          disabled={!allEvaluations.length || geminiLoading}
+                          onClick={handleGeminiSummary}
+                        >
+                          {geminiLoading ? "Summarizing…" : "Gemini Summary"}
+                        </button>
+
                         <button onClick={flipBoard}>Flip board</button>
                         <button onClick={resetBoard}>Reset</button>
 
@@ -642,6 +694,39 @@ async function onPGNParsed({ headers, moves, file }) {
                                 Explanations and ideas for the current position.
                             </div>
                         </div>
+                        <div className="card gemini-card">
+                          <div className="panel-header">
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <span role="img">✨</span>
+                              <strong>Gemini Game Summary</strong>
+                            </div>
+                            <div className="panel-meta small dim">
+                              AI summary of the first 10–15 moves.
+                            </div>
+                          </div>
+
+                          {geminiLoading && (
+                            <p className="small" style={{ color: "orange" }}>
+                              🔄 Gemini is analyzing…
+                            </p>
+                          )}
+
+                          {geminiError && (
+                            <p style={{ color: "red" }}>
+                              ❌ {geminiError}
+                            </p>
+                          )}
+
+                          {!geminiLoading && geminiSummary && (
+                            <div className="gemini-output mono" style={{ whiteSpace: "pre-wrap" }}>
+                              {geminiSummary}
+                            </div>
+                          )}
+
+                          {!geminiLoading && !geminiSummary && (
+                            <p className="small dim">Press “Gemini Summary” to analyze the game.</p>
+                          )}
+</div>
 
                         <div className="coach-actions" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
                             <button

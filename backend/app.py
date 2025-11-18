@@ -7,36 +7,39 @@ import os
 from multiprocessing import Pool, cpu_count
 from concurrent.futures import ThreadPoolExecutor
 from motifs import detect_motifs
+import google.generativeai as genai
 
+
+# -------------------------
+# GEMINI CONFIG
+# -------------------------
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+GEM_MODEL = genai.GenerativeModel("gemini-2.0-flash")
 
 app = Flask(__name__)
 CORS(app)
 
-# Detect platform and choose correct Stockfish binary path
-if os.name == "nt":  
-    # WINDOWS
+# -------------------------
+# STOCKFISH CROSS-PLATFORM
+# -------------------------
+if os.name == "nt":
     STOCKFISH_PATH = os.path.join(os.path.dirname(__file__), "stockfish", "stockfish.exe")
-
 elif os.path.exists("/opt/homebrew/bin/stockfish"):
-    # MAC (M1/M2)
     STOCKFISH_PATH = "/opt/homebrew/bin/stockfish"
-
 elif os.path.exists("/usr/bin/stockfish"):
-    # LINUX
     STOCKFISH_PATH = "/usr/bin/stockfish"
-
 else:
-    raise FileNotFoundError("Could not find Stockfish binary for your system.")
+    raise FileNotFoundError("Stockfish binary not found.")
 
 
 executor = ThreadPoolExecutor(max_workers=2)
 
+
 def get_fresh_engine():
-    """Create a fresh Stockfish instance for each process."""
     return Stockfish(path=STOCKFISH_PATH, depth=18)
 
+
 def evaluate_fen(fen):
-    """Worker function for multiprocessing — runs one Stockfish eval."""
     try:
         engine = get_fresh_engine()
         engine.set_fen_position(fen)
@@ -55,9 +58,40 @@ def evaluate_fen(fen):
             "eval": eval_str,
             "best_move": engine.get_best_move(),
         }
+
     except Exception as e:
         return {"fen": fen, "error": str(e)}
 
+
+# -------------------------
+# GEMINI ENDPOINT
+# -------------------------
+@app.route("/api/gemini_summary", methods=["POST"])
+def gemini_summary():
+    data = request.get_json()
+    evaluations = data.get("evaluations", [])
+
+    limited = evaluations[:15]  # first 15 moves
+
+    prompt = "Analyze the following chess positions.\n"
+    prompt += "For each move, explain the strategy, ideas, and mistakes.\n\n"
+
+    for ev in limited:
+        prompt += f"Move {ev['move_number']} — Eval {ev['eval']}\n"
+        prompt += f"FEN: {ev['fen']}\n"
+        prompt += f"Best move: {ev['best_move']}\n\n"
+
+    try:
+        response = GEM_MODEL.generate_content(prompt)
+        return jsonify({"analysis": response.text})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# -------------------------
+# FULL PGN EVALUATION
+# -------------------------
 @app.route("/api/evaluate_pgn", methods=["POST"])
 def evaluate_pgn():
     if "file" not in request.files:
@@ -75,45 +109,40 @@ def evaluate_pgn():
             board.push(move)
             fens.append(board.fen())
 
-        # Run stockfish evals in parallel
         with Pool(processes=max(1, cpu_count() - 1)) as pool:
             results = pool.map(evaluate_fen, fens)
 
-        # Add move numbers
+        prev_eval = None
+        board = game.board()
+
         for i, r in enumerate(results):
             r["move_number"] = i + 1
 
-        # ----------------------------------------
-        # 🟦 NEW: Motif detection integration
-        # ----------------------------------------
-        prev_eval = None
-        for i, r in enumerate(results):
-            fen = r["fen"]
-            numeric_eval = r["score"] * 100  # convert back to cp for consistency
-
-            board.set_fen(fen)
-
+            board.set_fen(r["fen"])
             motifs = detect_motifs(
                 board,
                 move_number=i + 1,
-                eval=numeric_eval,
+                eval=r["score"] * 100,
                 prev_eval=prev_eval
             )
-
             r["motifs"] = motifs
-            r["eval_delta"] = None if prev_eval is None else numeric_eval - prev_eval
-            prev_eval = numeric_eval
-        # ----------------------------------------
+            r["eval_delta"] = None if prev_eval is None else r["score"] * 100 - prev_eval
+            prev_eval = r["score"] * 100
 
-        return jsonify({"count": len(results), "evaluations": results})
+        return jsonify({
+            "count": len(results),
+            "evaluations": results
+        })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
+# -------------------------
+# SINGLE POSITION EVAL
+# -------------------------
 @app.route("/api/coach", methods=["POST"])
 def analyze_position():
-    """Single FEN evaluation — used for live board updates."""
     data = request.get_json()
     if not data or "fen" not in data:
         return jsonify({"error": "Missing FEN"}), 400
@@ -126,7 +155,6 @@ def analyze_position():
         return engine.get_evaluation()
 
     try:
-        # Run asynchronously in thread executor
         future = executor.submit(run_stockfish_eval, fen)
         evaluation = future.result(timeout=2)
 
@@ -144,14 +172,12 @@ def analyze_position():
             "eval": eval_str,
             "numeric_eval": evaluation["value"],
             "best_move": best_move,
-            "ideas": [
-                f"Stockfish suggests {best_move} as the best move.",
-                "Keep your pieces active and king safe.",
-                "Look for tactical opportunities."
-            ]
         })
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=True)
+print("Gemini key loaded?", bool(os.getenv("GEMINI_API_KEY")))
