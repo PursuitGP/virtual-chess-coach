@@ -1,110 +1,73 @@
+/* ======================================
+   🎨 COLOR VARIABLES — easy to customize
+   --------------------------------------
+   --bg-top:      top of gradient
+   --bg-bottom:   bottom of gradient
+   --title-color: main title text color
+   --subtitle-color: subtitle text color
+   --btn-bg:      button background
+   --btn-bg-hover: button hover color
+   ====================================== */
+
+:root {
+  --bg-top: #0d3b45;
+  --bg-bottom: #0e4f5d;
+  --title-color: #ffffff;
+  --subtitle-color: #d1d7dc;
+  --btn-bg: #0db8a3;
+  --btn-bg-hover: #11cfb7;
+}
+
+/* ===== Fullscreen Background ===== */
 .welcome-container {
-  display: flex;
-  align-items: center;
-  justify-content: center;
   height: 100vh;
   width: 100%;
-  background: linear-gradient(135deg, #b3ecff, #66b2ff, #3399ff); /* 🌊 Light ocean blue gradient */
-  color: #002244;
-  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+
+  background: linear-gradient(
+    to bottom,
+    var(--bg-top),
+    var(--bg-bottom)
+  );
+
+  padding: 0 20px;
+  box-sizing: border-box;
 }
 
-
-.welcome-card {
-  background: rgba(197, 176, 176, 0); /* translucent glassy card */
-  border: 1px solid rgba(16, 61, 106, 0.3);
-  color: #104981;
-  border-radius: 16px;
-  padding: 32px 40px;
-  box-shadow: 0 10px 24px rgba(0, 60, 88, 0.3);
-  max-width: 520px;
-  width: 90%;
+/* ===== Centered Column Content ===== */
+.welcome-content {
   text-align: center;
-  animation: fadeInUp 1s ease;
 }
 
+/* ===== Title ===== */
 .welcome-title {
-  font-size: 1.8rem;
-  margin-bottom: 0.5rem;
+  color: var(--title-color);
+  font-size: 3rem;
+  font-weight: 700;
+  margin-bottom: 15px;
 }
 
+/* ===== Subtitle ===== */
 .welcome-subtitle {
-  font-size: 1rem;
-  color: #081324;
-  margin-bottom: 1.5rem;
+  color: var(--subtitle-color);
+  font-size: 1.1rem;
+  margin-bottom: 35px;
 }
 
-.welcome-form {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.welcome-label {
-  font-size: 0.9rem;
-  text-align: left;
-  color: #060709;
-}
-
-.welcome-input,
-.welcome-textarea {
-  width: 100%;
-  background: #e5e7eb;
-  color: #9a9c9e;
-  border: 1px solid #1f2937;
-  border-radius: 10px;
-  padding: 10px;
-  font-size: 0.95rem;
-  resize: vertical;
-}
-
-.welcome-textarea {
-  min-height: 100px;
-}
-
-.welcome-buttons {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.btn {
-  padding: 10px 14px;
-  border-radius: 8px;
-  font-size: 0.95rem;
+/* ===== Start Button ===== */
+.welcome-start-btn {
+  padding: 12px 28px;
+  background: var(--btn-bg);
   border: none;
+  border-radius: 8px;
+  color: white;
+  font-size: 1.2rem;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: 0.2s ease-in-out;
 }
 
-.btn.primary {
-  background: #2563eb;
-  color: rgb(236, 228, 228);
-  font-weight: 600;
-}
-
-.btn.primary:hover {
-  background: #1e45b3;
-}
-
-.btn.ghost {
-  background: transparent;
-  color: #e2e8f0;
-  border: 1px solid #334155;
-}
-
-.btn.ghost:hover {
-  background: #232f43;
-}
-
-/* Entry animation */
-@keyframes fadeInUp {
-  from {
-    opacity: 0;
-    transform: translateY(30px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+.welcome-start-btn:hover {
+  background: var(--btn-bg-hover);
 }
