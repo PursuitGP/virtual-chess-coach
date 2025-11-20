@@ -1,3 +1,4 @@
+import WelcomePage from "./WelcomePage";
 import React, { useMemo, useState } from "react";
 import Chessground from "react-chessground";
 import "chessground/assets/chessground.base.css";
@@ -25,7 +26,6 @@ ChartJS.register(CategoryScale, LinearScale, LineElement, PointElement, Tooltip,
 const FILES = ["a","b","c","d","e","f","g","h"];
 const RANKS = ["1","2","3","4","5","6","7","8"];
 const ALL_SQUARES = FILES.flatMap(f => RANKS.map(r => f + r));
-
 
 
 function isTyping(node) {
@@ -56,6 +56,7 @@ function sanToPairs(sanList) {
 
 
 export default function App() {
+  const [showWelcome, setShowWelcome] = useState(true);
   const [game, setGame] = useState(() => new Chess());
   const [fen, setFen] = useState(() => game.fen());
   const [orientation, setOrientation] = useState("white");
@@ -337,6 +338,9 @@ const chartOptions = useMemo(() => ({
 
   const [isEvaluating, setIsEvaluating] = useState(false);
 
+if (showWelcome) {
+  return <WelcomePage onStart={() => setShowWelcome(false)} />;
+}
 
 async function onPGNParsed({ headers, moves, file }) {
   setIsEvaluating(true);
