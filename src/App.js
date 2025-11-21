@@ -1,5 +1,5 @@
 import WelcomePage from "./WelcomePage";
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import Chessground from "react-chessground";
 import "chessground/assets/chessground.base.css";
 import "chessground/assets/chessground.brown.css";
@@ -7,7 +7,6 @@ import "chessground/assets/chessground.cburnett.css";
 import "./App.css";
 import { Chess } from "chess.js";
 import PGNLoader from "./PGNLoader";
-import { useEffect } from "react";
 import { Line } from "react-chartjs-2";
 import {
   Chart as ChartJS,
@@ -34,26 +33,11 @@ const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
 const RANKS = ["1", "2", "3", "4", "5", "6", "7", "8"];
 const ALL_SQUARES = FILES.flatMap((f) => RANKS.map((r) => f + r));
 
-function isTyping(node) {
-  if (!node) return false;
-  const tag = (node.tagName || "").toLowerCase();
-  return (
-    tag === "input" ||
-    tag === "textarea" ||
-    tag === "select" ||
-    node.isContentEditable
-  );
-}
-
 function computeDests(chess) {
   const dests = new Map();
   for (const s of ALL_SQUARES) {
     const moves = chess.moves({ square: s, verbose: true });
-    if (moves.length)
-      dests.set(
-        s,
-        moves.map((m) => m.to)
-      );
+    if (moves.length) dests.set(s, moves.map((m) => m.to));
   }
   return dests;
 }
@@ -73,25 +57,33 @@ function sanToPairs(sanList) {
 
 export default function App() {
   const [showWelcome, setShowWelcome] = useState(true);
+
   const [game, setGame] = useState(() => new Chess());
   const [fen, setFen] = useState(() => game.fen());
   const [orientation, setOrientation] = useState("white");
   const [lastMove, setLastMove] = useState(null);
   const [displayHistory, setDisplayHistory] = useState([]); // SAN tokens
 
-  // PGN state
+  // PGN & replay
   const [pgnHeaders, setPgnHeaders] = useState(null);
-  const [pgnMoves, setPgnMoves] = useState([]); // verbose
+  const [pgnMoves, setPgnMoves] = useState([]); // verbose from PGNLoader
   const [plyIndex, setPlyIndex] = useState(0);
 
-  //Eval
-  //Eval
-  const [evaluation, setEvaluation] = useState(0); // numeric for bar height
-  const [allEvaluations, setAllEvaluations] = useState([]);
-  const [evalLabel, setEvalLabel] = useState("0.00"); // text shown on bar
+  // Engine evals
+  const [evaluation, setEvaluation] = useState(0); // current position eval in pawns
+  const [allEvaluations, setAllEvaluations] = useState([]); // list from backend
 
-  // Board size (px)
+  // Gemini per-move summaries
+  const [geminiLoading, setGeminiLoading] = useState(false);
+  const [geminiError, setGeminiError] = useState(null);
+  const [geminiSummaries, setGeminiSummaries] = useState([]); // one summary per ply
+  const [geminiProgress, setGeminiProgress] = useState({ done: 0, total: 0 });
+
+  // Board size
   const [boardSize, setBoardSize] = useState(600);
+
+  // Backend loading flag for PGN evaluation
+  const [isEvaluating, setIsEvaluating] = useState(false);
 
   const dests = useMemo(() => computeDests(game), [game, fen]);
   const turnColor = game.turn() === "w" ? "white" : "black";
@@ -99,25 +91,16 @@ export default function App() {
   function syncFrom(ch) {
     setGame(ch);
     setFen(ch.fen());
-    setDisplayHistory(ch.history()); // SAN
+    setDisplayHistory(ch.history()); // SAN list
   }
 
-  function applyMove(from, to) {
+  function onMove(from, to) {
     const ch = new Chess(game.fen());
     const mv = ch.move({ from, to, promotion: "q" });
     if (mv) {
       setLastMove([from, to]);
       syncFrom(ch);
-    }
-  }
-
-  function onMove(from, to) {
-    const gameCopy = new Chess(game.fen());
-    const move = gameCopy.move({ from, to, promotion: "q" });
-    if (move) {
-      setLastMove([from, to]);
-      syncFrom(gameCopy);
-      //analyzePosition(gameCopy.fen()); // ask backend for eval after each move
+      // (Optional) could call /api/coach here for "live" eval of casual moves
     }
   }
 
@@ -126,7 +109,7 @@ export default function App() {
     syncFrom(fresh);
     setPlyIndex(0);
     setLastMove(null);
-    setEvaluation(0); // reset the eval bar
+    setEvaluation(0);
   }
 
   function flipBoard() {
@@ -136,7 +119,9 @@ export default function App() {
   function stepTo(index) {
     const target = Math.max(0, Math.min(index, pgnMoves.length));
     const replay = new Chess();
-    for (let i = 0; i < target; i++) replay.move(pgnMoves[i]);
+    for (let i = 0; i < target; i++) {
+      replay.move(pgnMoves[i]);
+    }
 
     setLastMove(
       target > 0 ? [pgnMoves[target - 1].from, pgnMoves[target - 1].to] : null
@@ -144,159 +129,19 @@ export default function App() {
     setPlyIndex(target);
     syncFrom(replay);
 
-    // 🔥 Use the *explicit* ply we just computed
-    testMotifsAndAPI(replay.fen(), target);
-
-    // ✅ Evaluation logic already uses `target`
-    const evalForMove = allEvaluations[target - 1];
-
-    let numeric = 0;
-    let label = "0.00";
-
-    if (evalForMove) {
-      numeric = typeof evalForMove.score === "number" ? evalForMove.score : 0;
-
-      const sfRaw = evalForMove.sf_raw;
-
-      if (sfRaw && sfRaw.type === "mate") {
-        const v = typeof sfRaw.value === "number" ? sfRaw.value : 0;
-
-        if (v === 0) {
-          let sideToMove = "w";
-          try {
-            const parts = evalForMove.fen.split(" ");
-            sideToMove = parts[1] === "b" ? "b" : "w";
-          } catch {}
-
-          const winner = sideToMove === "w" ? "black" : "white";
-
-          label = winner === "white" ? "#W" : "#B";
-          numeric = winner === "white" ? 10 : -10;
-        } else {
-          const n = Math.abs(v);
-          const side = v > 0 ? "white" : "black";
-
-          label = side === "white" ? `M${n}` : `-M${n}`;
-          numeric = side === "white" ? 10 : -10;
-        }
-      } else if (
-        typeof evalForMove.eval === "string" &&
-        /^-?M\d+$/i.test(evalForMove.eval.trim())
-      ) {
-        label = evalForMove.eval.trim();
-      } else {
-        label = (numeric >= 0 ? "+" : "") + numeric.toFixed(2);
-      }
+    // Update eval bar using precomputed evaluations
+    if (target === 0 || !allEvaluations.length) {
+      setEvaluation(0);
+    } else {
+      const ev = allEvaluations[target - 1];
+      const val =
+        ev && ev.score !== undefined && ev.score !== null
+          ? Number(ev.score)
+          : 0;
+      setEvaluation(val);
     }
-
-    setEvaluation(numeric);
-    setEvalLabel(label);
   }
-  // classify each move by drop severity (in pawn units)
-  // --- Review Graph Computation ---
 
-  const iconForColor = (color) => {
-    if (color === "#00ff00") return "✅"; // good move
-    if (color === "#ffd700") return "❓"; // inaccuracy
-    if (color === "#ff8c00") return "?!"; // mistake
-    if (color === "#ff0000") return "❌"; // blunder
-    return "";
-  };
-  const points = useMemo(() => {
-    return allEvaluations.map((e, i) => {
-      if (i === 0) return { x: i + 1, y: e.score, color: "#00ff00" }; // start
-      const prev = allEvaluations[i - 1]?.score ?? 0;
-      const delta = e.score - prev;
-      const drop = Math.abs(delta);
-
-      let color = "#00ff00"; // green: good move
-      if (drop > 0.5 && drop <= 1.5) color = "#ffd700"; // yellow: inaccuracy
-      else if (drop > 1.5 && drop <= 3.0) color = "#ff8c00"; // orange: mistake
-      else if (drop > 3.0) color = "#ff0000"; // red: blunder
-
-      return { x: i + 1, y: e.score, color };
-    });
-  }, [allEvaluations]);
-
-  useEffect(() => {
-    const isTyping = (el) => {
-      if (!el) return false;
-      const tag = (el.tagName || "").toLowerCase();
-      return (
-        tag === "input" ||
-        tag === "textarea" ||
-        tag === "select" ||
-        el.isContentEditable
-      );
-    };
-
-    const onKeyDown = (e) => {
-      if (isTyping(e.target)) return;
-
-      switch (e.key) {
-        case "ArrowLeft":
-          e.preventDefault();
-          prevPly();
-          break;
-        case "ArrowRight":
-          e.preventDefault();
-          nextPly();
-          break;
-
-        case "End":
-          e.preventDefault();
-          goToEnd();
-          break;
-        case "r": // NEW: reset board
-        case "R":
-          e.preventDefault();
-          resetBoard();
-          break;
-        case "f": // NEW: flip board
-        case "F":
-          e.preventDefault();
-          flipBoard();
-          break;
-        default:
-          break;
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [prevPly, nextPly, goToStart, goToEnd, resetBoard, flipBoard]);
-
-  /*  function nextPly() {
-  if (plyIndex < pgnMoves.length) {
-    const newPly = plyIndex + 1;
-    const replay = new Chess();
-    for(let i = 0; i < newPly; i++) {
-      replay.move(pgnMoves[i]);
-    }
-    syncFrom(replay);
-    setPlyIndex(newPly);
-   // analyzePosition(replay.fen());
-  }
-}
-
-   // function prevPly() { safeStepTo(plyIndex - 1); }
-   function prevPly() {
-  if (plyIndex > 0) {
-    const newPly = plyIndex - 1;
-    const replay = new Chess();
-    for (let i = 0; i < newPly; i++) {
-      replay.move(pgnMoves[i]);
-    }
-    syncFrom(replay);
-    setPlyIndex(newPly);
-    analyzePosition(replay.fen()); // ✅ update eval
-  }
-}
-
-
-    function goToStart() { safeStepTo(0); }
-    function goToEnd() { safeStepTo(pgnMoves.length); }
-*/
   function nextPly() {
     stepTo(plyIndex + 1);
   }
@@ -312,17 +157,27 @@ export default function App() {
 
   const movePairs = sanToPairs(displayHistory);
 
-  // Clamp target index into [0, pgnMoves.length]
-  function safeStepTo(i) {
-    const max = Array.isArray(pgnMoves) ? pgnMoves.length : 0;
-    stepTo(Math.max(0, Math.min(max, i)));
-  }
+  // --- Review graph data ---
+  const points = useMemo(() => {
+    if (!allEvaluations.length) return [];
 
-  // --- Coach sidebar state ---
-  const [coachOpen, setCoachOpen] = React.useState(true);
-  const [coachLoading, setCoachLoading] = React.useState(false);
-  const [coachData, setCoachData] = React.useState(null);
-  const [coachError, setCoachError] = React.useState(null);
+    return allEvaluations.map((e, i) => {
+      const scoreNow = Number(e.score ?? 0);
+      if (i === 0) {
+        return { x: 1, y: scoreNow, color: "#00ff00" }; // first move
+      }
+      const prev = Number(allEvaluations[i - 1]?.score ?? 0);
+      const delta = scoreNow - prev;
+      const drop = Math.abs(delta);
+
+      let color = "#00ff00"; // good
+      if (drop > 0.5 && drop <= 1.5) color = "#ffd700"; // inaccuracy
+      else if (drop > 1.5 && drop <= 3.0) color = "#ff8c00"; // mistake
+      else if (drop > 3.0) color = "#ff0000"; // blunder
+
+      return { x: i + 1, y: scoreNow, color };
+    });
+  }, [allEvaluations]);
 
   const chartData = {
     datasets: [
@@ -352,21 +207,12 @@ export default function App() {
           min: 1,
           max: allEvaluations.length || 1,
           grid: { display: false },
-          title: { display: true, text: "Ply (w/b)" },
+          title: { display: true, text: "Moves" },
           ticks: {
             color: "#ccc",
-            stepSize: 1,
-            callback: (value) => {
-              const ply = Number(value);
-              if (!Number.isFinite(ply) || ply < 1) return "";
-              const fullMove = Math.ceil(ply / 2);
-              const isWhite = ply % 2 === 1;
-              // 1w, 1b, 2w, 2b, ...
-              return isWhite ? `${fullMove}w` : `${fullMove}b`;
-            },
+            stepSize: 2,
           },
         },
-
         y: {
           min: -10,
           max: 10,
@@ -377,18 +223,15 @@ export default function App() {
       plugins: {
         legend: { display: false },
         annotation: {
-          annotations:
-            plyIndex > 0
-              ? {
-                  current: {
-                    type: "line",
-                    xMin: plyIndex,
-                    xMax: plyIndex,
-                    borderColor: "cyan",
-                    borderWidth: 2,
-                  },
-                }
-              : {},
+          annotations: {
+            current: {
+              type: "line",
+              xMin: plyIndex + 1,
+              xMax: plyIndex + 1,
+              borderColor: "cyan",
+              borderWidth: 2,
+            },
+          },
         },
       },
       responsive: true,
@@ -397,26 +240,64 @@ export default function App() {
     [allEvaluations.length, plyIndex]
   );
 
-  // Build the payload we’ll send (FEN + SAN history up to current ply)
-  const coachPayload = React.useMemo(() => {
-    const movesSoFar = Array.isArray(displayHistory)
-      ? displayHistory.slice(
-          0,
-          Math.max(0, Math.min(displayHistory.length, plyIndex))
-        )
-      : [];
-    return {
-      fen,
-      moves: movesSoFar, // SAN list
-      ply: plyIndex,
-      headers: pgnHeaders || {}, // Event, Site, White, Black, etc.
+  // --- Keyboard navigation ---
+  useEffect(() => {
+    const isTyping = (el) => {
+      if (!el) return false;
+      const tag = (el.tagName || "").toLowerCase();
+      return (
+        tag === "input" ||
+        tag === "textarea" ||
+        tag === "select" ||
+        el.isContentEditable
+      );
     };
-  }, [fen, displayHistory, plyIndex, pgnHeaders]);
 
-  //Backend//
+    const onKeyDown = (e) => {
+      if (isTyping(e.target)) return;
 
-  const [isEvaluating, setIsEvaluating] = useState(false);
+      switch (e.key) {
+        case "ArrowLeft":
+          e.preventDefault();
+          prevPly();
+          break;
+        case "ArrowRight":
+          e.preventDefault();
+          nextPly();
+          break;
+        case "End":
+          e.preventDefault();
+          goToEnd();
+          break;
+        case "r":
+        case "R":
+          e.preventDefault();
+          resetBoard();
+          break;
+        case "f":
+        case "F":
+          e.preventDefault();
+          flipBoard();
+          break;
+        default:
+          break;
+      }
+    };
 
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [prevPly, nextPly, goToEnd, resetBoard, flipBoard]);
+
+  // --- Which Gemini summary do we show for current ply? ---
+  const currentSummaryIndex =
+    geminiSummaries.length > 0
+      ? Math.max(0, Math.min(plyIndex - 1, geminiSummaries.length - 1))
+      : -1;
+
+  const currentGeminiSummary =
+    currentSummaryIndex >= 0 ? geminiSummaries[currentSummaryIndex] : "";
+
+  // --- PGN upload handler ---
   async function onPGNParsed({ headers, moves, file }) {
     setIsEvaluating(true);
     setPgnHeaders(headers || {});
@@ -431,66 +312,24 @@ export default function App() {
         method: "POST",
         body: formData,
       });
+
       const data = await res.json();
+      console.log("evaluate_pgn response:", data);
 
       if (data.evaluations) {
         setAllEvaluations(data.evaluations);
+        const firstScore =
+          data.evaluations[0] && data.evaluations[0].score != null
+            ? Number(data.evaluations[0].score)
+            : 0;
+        setEvaluation(firstScore);
 
-        const first = data.evaluations[0];
-
-        let numeric = 0;
-        let label = "0.00";
-
-        if (first) {
-          numeric = typeof first.score === "number" ? first.score : 0;
-
-          const sfRaw = first.sf_raw;
-
-          function fenToMoveTurn(fen) {
-            try {
-              return fen.split(" ")[1] === "w" ? "w" : "b";
-            } catch {
-              return "w";
-            }
-          }
-
-          // Prefer raw Stockfish mate info if present
-          // ----- MATE EVAL -----
-          if (sfRaw && sfRaw.type === "mate") {
-            const v = typeof sfRaw.value === "number" ? sfRaw.value : 0;
-
-            // Use the ACTUAL replayed FEN (correct position)
-            let sideToMove = "w";
-            try {
-              sideToMove = replay.fen().split(" ")[1];
-            } catch {
-              sideToMove = "w";
-            }
-
-            if (v === 0) {
-              // Mate delivered on this move
-              const winner = sideToMove === "w" ? "black" : "white";
-              numeric = winner === "white" ? 10 : -10;
-              label = winner === "white" ? "#W" : "#B";
-            } else {
-              // Mate-in-N
-              const n = Math.abs(v);
-              const side = v > 0 ? "white" : "black";
-              numeric = side === "white" ? 10 : -10;
-              label = side === "white" ? `M${n}` : `-M${n}`;
-            }
-
-            setEvaluation(numeric);
-            setEvalLabel(label);
-            return;
-          }
-        }
-
-        setEvaluation(numeric);
-        setEvalLabel(label);
-
+        // preload starting board
         const fresh = new Chess();
         syncFrom(fresh);
+
+        // kick off Gemini per-move explanations
+        askGemini(data.evaluations);
       } else {
         console.error("No evaluations returned:", data);
       }
@@ -501,190 +340,94 @@ export default function App() {
     }
   }
 
-  async function analyzePosition(currentFen) {
-    setCoachLoading(true);
-    try {
-      const res = await fetch("http://127.0.0.1:5000/api/coach", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fen: currentFen }),
-      });
+  // --- Gemini per-move explanations (first 15 full moves / 30 plies) ---
+  async function askGemini(evaluations) {
+    if (!evaluations || !evaluations.length) return;
 
-      const data = await res.json();
-      if (data.error) {
-        console.error("Backend error:", data.error);
-        return;
-      }
+    // Restrict to first 30 plies (15 full moves)
+    const limited = evaluations.slice(0, 30);
 
-      // Convert eval string to numeric bar value
-      let evalValue = 0;
-      let label = "0.00";
+    setGeminiLoading(true);
+    setGeminiError(null);
+    setGeminiSummaries(Array(limited.length).fill(null));
+    setGeminiProgress({ done: 0, total: limited.length });
 
-      if (data.eval && data.eval.includes("Mate")) {
-        const m = data.eval.match(/-?\d+/);
-        if (m) {
-          const n = parseInt(m[0], 10);
-          label = n < 0 ? `-M${Math.abs(n)}` : `M${n}`;
-          evalValue = n < 0 ? -10 : 10;
+    const newSummaries = Array(limited.length).fill(null);
+
+    for (let i = 0; i < limited.length; i++) {
+      const ev = limited[i];
+
+      const scoreAfter = Number(ev.score ?? 0);
+      const scoreBefore =
+        i > 0 ? Number(limited[i - 1]?.score ?? 0) : 0;
+
+      const fullMoveNumber = Math.floor(i / 2) + 1;
+      const color = i % 2 === 0 ? "White" : "Black";
+
+      const san =
+        ev.san ||
+        `Move ${fullMoveNumber} (${color})`;
+
+      const bestMove = ev.best_move || null;
+      const motifs = ev.motifs || [];
+
+      try {
+        const res = await fetch("http://127.0.0.1:5000/api/gemini_move", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            move_index: i,
+            full_move_number: fullMoveNumber,
+            color,
+            san,
+            score_before: scoreBefore,
+            score_after: scoreAfter,
+            best_move: bestMove,
+            motifs,
+          }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || data.error) {
+          console.error("Gemini move error:", data.error || res.status);
+          // Only show a generic error once, but keep going for other moves
+          setGeminiError(
+            (prev) =>
+              prev ||
+              (res.status === 429
+                ? "Gemini quota or rate limit exceeded. Some moves were not analyzed."
+                : "Gemini could not analyze some moves.")
+          );
+          newSummaries[i] = null;
         } else {
-          label = "M";
-          evalValue = 10;
+          newSummaries[i] = data.summary;
         }
-      } else if (data.eval) {
-        evalValue = parseFloat(data.eval);
-        if (Math.abs(evalValue) > 10) evalValue = evalValue / 100;
-        label = (evalValue >= 0 ? "+" : "") + evalValue.toFixed(2);
+      } catch (err) {
+        console.error("Gemini fetch failed:", err);
+        setGeminiError(
+          (prev) => prev || "Could not reach Gemini backend for some moves."
+        );
+        newSummaries[i] = null;
       }
 
-      setEvaluation(evalValue);
-      setEvalLabel(label);
+      setGeminiSummaries([...newSummaries]);
+      setGeminiProgress((prev) => ({ ...prev, done: i + 1 }));
 
-      console.log("Eval:", evalValue, "Best move:", data.best_move);
-    } catch (err) {
-      console.error("Error calling backend:", err);
-    } finally {
-      setCoachLoading(false);
+      // small delay to avoid hammering free-tier quota too hard
+      await new Promise((res) => setTimeout(res, 250));
     }
+
+    setGeminiLoading(false);
   }
 
-  async function updateEvaluation(fen) {
-    try {
-      const res = await fetch("http://127.0.0.1:5000/api/coach", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fen }),
-      });
-      const data = await res.json();
-      if (data.eval) setEvaluation(parseFloat(data.eval));
-    } catch (err) {
-      console.error("Eval fetch failed:", err);
-    }
-  }
-
-  async function handleAskCoach() {
-    setCoachOpen(true);
-    setCoachError(null);
-    setCoachLoading(true);
-    setCoachData(null);
-
-    try {
-      // If your backend isn’t ready yet, keep this console.log
-      console.log("Coach request payload:", coachPayload);
-
-      // Uncomment when backend is ready:
-      // const res = await fetch("/api/coach", {
-      //   method: "POST",
-      //   headers: { "Content-Type": "application/json" },
-      //   body: JSON.stringify(coachPayload),
-      // });
-      // if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // const data = await res.json();
-      // setCoachData(data);
-
-      // Temporary demo: fake response so UI shows something
-      await new Promise((r) => setTimeout(r, 700));
-      setCoachData({
-        opening: "King's Gambit (C30) — gist",
-        eval: "+0.3 (Stockfish depth 18)",
-        ideas: [
-          "Control center with d4 next; watch …Qh4+ tactics.",
-          "If …exf4, consider Nf3 and Bc4 pressure.",
-        ],
-        note: "Replace this with real backend data later.",
-      });
-    } catch (err) {
-      setCoachError(err.message || "Coach backend not reachable.");
-    } finally {
-      setCoachLoading(false);
-    }
-  }
-
-  // --- Motif & Lichess Test Panel ---
-  const [motifInfo, setMotifInfo] = useState(null);
-  const [motifLoading, setMotifLoading] = useState(false);
-  const [motifError, setMotifError] = useState(null);
-
-  // Set this to whatever you want (default 20)
-  const MIN_GAMES_THRESHOLD = 20;
-
-  async function testMotifsAndAPI(fen, ply) {
-    setMotifLoading(true);
-    setMotifError(null);
-    setMotifInfo(null);
-
-    try {
-      console.log("Testing motifs for:", fen, "at ply", ply);
-
-      // Use the explicit ply corresponding to THIS FEN
-      const last = ply > 0 ? pgnMoves[ply - 1] : null;
-      const prev = ply > 1 ? pgnMoves[ply - 2] : null;
-      // NEW: compute previous Fen
-      let prevFen = null;
-      if (ply > 0) {
-        const replayPrev = new Chess();
-        for (let i = 0; i < ply - 1; i++) replayPrev.move(pgnMoves[i]);
-        prevFen = replayPrev.fen();
-      }
-
-      const lastUci = last && last.from && last.to ? last.from + last.to : null;
-
-      const prevUci = prev && prev.from && prev.to ? prev.from + prev.to : null;
-
-      const evalForMove = ply > 0 ? allEvaluations[ply - 1] || {} : {};
-      const numericEval =
-        typeof evalForMove.score === "number" ? evalForMove.score : 0;
-      const sfRaw = evalForMove.sf_raw || null;
-
-      const motifPayload = {
-        fen,
-        prev_fen: prevFen, // <----- NEW
-        last_move_uci: lastUci,
-        prev_move_uci: prevUci,
-        eval: numericEval,
-        sf_raw: sfRaw,
-        move_number: ply,
-      };
-
-      const motifRes = await fetch("http://127.0.0.1:5000/api/motifs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(motifPayload),
-      });
-
-      const motifData = await motifRes.json();
-
-      // Lichess masters explorer
-      const encodedFen = encodeURIComponent(fen);
-      const lichessRes = await fetch(
-        `https://explorer.lichess.ovh/masters?fen=${encodedFen}&moves=10`
-      );
-      const lichessData = await lichessRes.json();
-
-      const totalGames =
-        (lichessData.white || 0) +
-        (lichessData.black || 0) +
-        (lichessData.draws || 0);
-
-      const meetsThreshold = totalGames >= MIN_GAMES_THRESHOLD;
-
-      setMotifInfo({
-        fen,
-        motifs: motifData.motifs || [],
-        lichess: lichessData,
-        totalGames,
-        meetsThreshold,
-      });
-    } catch (err) {
-      console.error(err);
-      setMotifError(err.message || "Motif tester failed");
-    } finally {
-      setMotifLoading(false);
-    }
+  if (showWelcome) {
+    return <WelcomePage onStart={() => setShowWelcome(false)} />;
   }
 
   return (
     <div className="container wide">
-      <h1 style={{ marginBottom: 12 }}>♜ Virtual Chess Coach=</h1>
+      <h1 style={{ marginBottom: 12 }}>♜ Virtual Chess Coach</h1>
 
       <div className="badge" style={{ marginBottom: 12 }}>
         <span>Turn:&nbsp;</span>
@@ -692,8 +435,9 @@ export default function App() {
       </div>
 
       <div className="grid grid-2">
+        {/* LEFT: Board + evals */}
         <div className="card">
-          {/* Control Dashboard */}
+          {/* Controls */}
           <div className="controls">
             <button onClick={flipBoard}>Flip board</button>
             <button onClick={resetBoard}>Reset</button>
@@ -708,7 +452,10 @@ export default function App() {
             <button onClick={prevPly} disabled={plyIndex === 0}>
               ◀
             </button>
-            <button onClick={nextPly} disabled={plyIndex >= pgnMoves.length}>
+            <button
+              onClick={nextPly}
+              disabled={plyIndex >= pgnMoves.length}
+            >
               ▶
             </button>
             <button
@@ -724,6 +471,7 @@ export default function App() {
                 ? `Move ${plyIndex}/${pgnMoves.length}`
                 : "No PGN loaded"}
             </span>
+
             <div className="size-control">
               <label>Board size: {boardSize}px</label>
               <input
@@ -732,7 +480,9 @@ export default function App() {
                 max="720"
                 step="10"
                 value={boardSize}
-                onChange={(e) => setBoardSize(Number(e.target.value))}
+                onChange={(e) =>
+                  setBoardSize(Number(e.target.value))
+                }
               />
             </div>
           </div>
@@ -751,7 +501,8 @@ export default function App() {
           >
             <span style={{ opacity: 0.9 }}>Shortcuts:</span>
             <span>
-              <kbd className="kbd">←</kbd>/<kbd className="kbd">→</kbd> step
+              <kbd className="kbd">←</kbd>/
+              <kbd className="kbd">→</kbd> step
             </span>
             <span>
               <kbd className="kbd">End</kbd> skip
@@ -764,29 +515,17 @@ export default function App() {
             </span>
           </div>
 
-          {/* Evaluation Bar + Board */}
+          {/* Evaluation bar + board */}
           <div
             style={{
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              gap: "8px",
+              gap: "5px",
               marginTop: "16px",
             }}
           >
-            {/* Eval label on the left, always readable */}
-            <div
-              style={{
-                minWidth: 48,
-                textAlign: "right",
-                fontSize: "16px",
-                fontWeight: "bold",
-              }}
-            >
-              {evalLabel}
-            </div>
-
-            {/* Evaluation Bar */}
+            {/* Eval bar */}
             <div
               className="eval-bar-container"
               style={{
@@ -805,10 +544,33 @@ export default function App() {
                   bottom: 0,
                   width: "100%",
                   background: "#fff",
-                  height: `${Math.min(100, Math.max(0, 50 + evaluation * 5))}%`,
+                  height: `${Math.min(
+                    100,
+                    Math.max(0, 50 + evaluation * 5)
+                  )}%`,
                   transition: "height 0.3s ease",
                 }}
-              />
+              ></div>
+
+              <div
+                style={{
+                  position: "absolute",
+                  top: `${100 - Math.min(
+                    100,
+                    Math.max(0, 50 + evaluation * 5)
+                  )}%`,
+                  width: "100%",
+                  fontSize: "15px",
+                  textAlign: "center",
+                  fontWeight: "bold",
+                  color: "#000000ff",
+                  textShadow: "0 0 4px rgba(0, 0, 0, 0)",
+                }}
+              >
+                {evaluation > 0
+                  ? `+${evaluation.toFixed(2)}`
+                  : evaluation.toFixed(2)}
+              </div>
             </div>
 
             {/* Chessboard */}
@@ -822,11 +584,17 @@ export default function App() {
               animation={{ enabled: true, duration: 200 }}
               highlight={{ lastMove: true, check: true }}
               draggable={{ enabled: true }}
-              movable={{ free: false, color: "both", dests, showDests: true }}
+              movable={{
+                free: false,
+                color: "both",
+                dests,
+                showDests: true,
+              }}
               onMove={onMove}
             />
           </div>
 
+          {/* Review graph */}
           <div
             style={{
               height: 160,
@@ -849,9 +617,16 @@ export default function App() {
           </div>
         </div>
 
+        {/* RIGHT: PGN loader + Gemini + history */}
         <div className="card">
           <div className="panel-header">
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
               <span role="img" aria-label="folder">
                 📂
               </span>
@@ -861,12 +636,19 @@ export default function App() {
               {pgnHeaders && (
                 <div className="pgn-meta">
                   <div>
-                    <strong>{pgnHeaders.White || "White"}</strong> vs{" "}
-                    <strong>{pgnHeaders.Black || "Black"}</strong>
+                    <strong>
+                      {pgnHeaders.White || "White"}
+                    </strong>{" "}
+                    vs{" "}
+                    <strong>
+                      {pgnHeaders.Black || "Black"}
+                    </strong>
                   </div>
                   <div>
-                    {pgnHeaders.Event || "Event"} • {pgnHeaders.Site || "Site"}{" "}
-                    • {pgnHeaders.Date || "Date"} • {pgnHeaders.Result || ""}
+                    {pgnHeaders.Event || "Event"} •{" "}
+                    {pgnHeaders.Site || "Site"} •{" "}
+                    {pgnHeaders.Date || "Date"} •{" "}
+                    {pgnHeaders.Result || ""}
                   </div>
                 </div>
               )}
@@ -874,6 +656,7 @@ export default function App() {
           </div>
 
           <PGNLoader onParsed={onPGNParsed} />
+
           {isEvaluating && (
             <p style={{ color: "orange" }}>
               🔄 Evaluating entire PGN... please wait.
@@ -881,7 +664,9 @@ export default function App() {
           )}
 
           {!isEvaluating && allEvaluations.length > 0 && (
-            <p style={{ color: "green" }}>✅ PGN fully evaluated!</p>
+            <p style={{ color: "green" }}>
+              ✅ PGN fully evaluated!
+            </p>
           )}
 
           <div style={{ marginTop: 12 }}>
@@ -889,195 +674,61 @@ export default function App() {
             <input readOnly value={fen} />
           </div>
 
-          {/* --- MOTIF / API TEST PANEL --- */}
-          <div
-            className="card"
-            style={{ marginTop: 16, background: "#111", padding: 12 }}
-          >
-            <h3 style={{ marginBottom: 8 }}>🔍 Motif + API Test</h3>
-
-            {motifLoading && (
-              <p style={{ color: "orange" }}>Checking motifs...</p>
-            )}
-            {motifError && <p style={{ color: "red" }}>❌ {motifError}</p>}
-
-            {motifInfo && (
-              <div style={{ fontSize: "0.85em", color: "#ccc" }}>
-                <p>
-                  <strong>FEN:</strong> {motifInfo.fen}
-                </p>
-                <p>
-                  <strong>Master DB games:</strong> {motifInfo.totalGames}
-                </p>
-
-                {motifInfo.meetsThreshold ? (
-                  <p style={{ color: "lightgreen" }}>
-                    ✔ Meets min threshold ({MIN_GAMES_THRESHOLD})
-                  </p>
-                ) : (
-                  <p style={{ color: "yellow" }}>
-                    ⚠ Not enough master games (need {MIN_GAMES_THRESHOLD})
-                  </p>
-                )}
-
-                <hr style={{ opacity: 0.2 }} />
-
-                <p>
-                  <strong>Detected motifs:</strong>
-                </p>
-                {motifInfo.motifs.length ? (
-                  <ul>
-                    {motifInfo.motifs.map((m, i) => (
-                      <li key={i} style={{ marginBottom: "6px" }}>
-                        <strong>{m.name}</strong> — {m.explanation}
-                        <br />
-                        <span style={{ fontSize: "0.8em", opacity: 0.7 }}>
-                          {m.side} • {m.severity} • Δ {m.eval_delta_cp}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p style={{ opacity: 0.6 }}>No motifs detected.</p>
-                )}
-
-                <hr style={{ opacity: 0.2 }} />
-
-                <p style={{ opacity: 0.7 }}>Raw Lichess DB Response (debug):</p>
-                <pre
-                  style={{
-                    maxHeight: 150,
-                    overflowY: "auto",
-                    background: "#000",
-                    padding: 8,
-                    borderRadius: 4,
-                    color: "#0f0",
-                  }}
-                >
-                  {JSON.stringify(motifInfo.lichess, null, 2)}
-                </pre>
-              </div>
-            )}
-          </div>
-
-          {/* --- COACH SIDEBAR --- */}
-          <div className="card coach-card">
+          {/* Gemini panel */}
+          <div className="card gemini-card" style={{ marginTop: 16 }}>
             <div className="panel-header">
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span role="img" aria-label="brain">
-                  🧠
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+              >
+                <span role="img" aria-label="sparkles">
+                  ✨
                 </span>
-                <strong>Coach</strong>
-                <span
-                  className={`status-dot ${
-                    coachLoading
-                      ? "busy"
-                      : coachData
-                      ? "ok"
-                      : coachError
-                      ? "err"
-                      : "idle"
-                  }`}
-                />
+                <strong>Gemini Move Explanation</strong>
               </div>
               <div className="panel-meta small dim">
-                Explanations and ideas for the current position.
+                AI explanation for the current move (first 15 full moves).
               </div>
             </div>
 
-            <div
-              className="coach-actions"
-              style={{
-                display: "flex",
-                gap: 8,
-                alignItems: "center",
-                marginBottom: 8,
-              }}
-            >
-              <button
-                className="btn"
-                onClick={handleAskCoach}
-                disabled={coachLoading || !pgnMoves?.length}
-                title="Send FEN + move history to Coach"
+            {geminiLoading && (
+              <p className="small" style={{ color: "orange" }}>
+                🔄 Gemini is analyzing… {geminiProgress.done}/
+                {geminiProgress.total}
+              </p>
+            )}
+
+            {geminiError && (
+              <p style={{ color: "red" }}>❌ {geminiError}</p>
+            )}
+
+            {!geminiLoading && currentGeminiSummary && (
+              <div
+                className="gemini-output mono"
+                style={{
+                  whiteSpace: "pre-wrap",
+                  marginTop: "0.75rem",
+                }}
               >
-                {coachLoading ? "Analyzing…" : "Ask Coach"}
-              </button>
-              <button
-                className="btn ghost"
-                onClick={() => setCoachOpen((o) => !o)}
-                title={coachOpen ? "Collapse" : "Expand"}
+                {currentGeminiSummary}
+              </div>
+            )}
+
+            {!geminiLoading && !currentGeminiSummary && (
+              <p
+                className="small dim"
+                style={{ marginTop: "0.75rem" }}
               >
-                {coachOpen ? "Hide" : "Show"}
-              </button>
-              <span className="small dim">Sends FEN + moves</span>
-            </div>
-
-            {coachOpen && (
-              <>
-                {/* Loading skeleton */}
-                {coachLoading && (
-                  <div className="coach-skeleton">
-                    <div className="sk-line" />
-                    <div className="sk-line" />
-                    <div className="sk-line short" />
-                  </div>
-                )}
-
-                {/* Error */}
-                {!coachLoading && coachError && (
-                  <div className="coach-error">
-                    <strong>Error:</strong> {coachError}
-                    <div className="small dim" style={{ marginTop: 6 }}>
-                      Is the backend running? Expected POST{" "}
-                      <code>/api/coach</code>.
-                    </div>
-                  </div>
-                )}
-
-                {/* Data */}
-                {!coachLoading && !coachError && coachData && (
-                  <div className="coach-result">
-                    {coachData.opening && (
-                      <div className="coach-row">
-                        <span className="pill">Opening</span>
-                        <div className="mono">{coachData.opening}</div>
-                      </div>
-                    )}
-                    {coachData.eval && (
-                      <div className="coach-row">
-                        <span className="pill">Eval</span>
-                        <div className="mono">{coachData.eval}</div>
-                      </div>
-                    )}
-                    {coachData.ideas?.length > 0 && (
-                      <div className="coach-row">
-                        <span className="pill">Ideas</span>
-                        <ul className="coach-list">
-                          {coachData.ideas.map((t, i) => (
-                            <li key={i}>{t}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                    {coachData.note && (
-                      <div className="small dim" style={{ marginTop: 8 }}>
-                        {coachData.note}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Payload preview (dev only) */}
-                {!coachLoading && !coachData && !coachError && (
-                  <details className="coach-payload">
-                    <summary className="small">Payload preview</summary>
-                    <pre>{JSON.stringify(coachPayload, null, 2)}</pre>
-                  </details>
-                )}
-              </>
+                No explanation for this move yet. Try stepping to a
+                move within the first 15 full moves.
+              </p>
             )}
           </div>
 
+          {/* Move history */}
           <div className="history" style={{ marginTop: 12 }}>
             <label>Move History</label>
             {movePairs.length === 0 ? (

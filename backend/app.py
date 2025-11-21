@@ -1,589 +1,380 @@
-# app.py (improved, replace your existing file with this)
 import io
 import os
-import logging
-import chess.pgn
-import requests
-from functools import lru_cache
+from multiprocessing import Pool, cpu_count
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from stockfish import Stockfish
-from multiprocessing import Pool, cpu_count
-from concurrent.futures import ThreadPoolExecutor
-from motifs import detect_motifs
-import google.generativeai as genai
+
+import chess
+import chess.pgn
+import chess.engine
+
+# -------------------------
+# Optional motifs import
+# -------------------------
+try:
+    from motifs import detect_motifs
+except Exception:
+    def detect_motifs(board, move_number=None, eval=None, prev_eval=None):
+        return []
 
 
 # -------------------------
-# GEMINI CONFIG
+# Optional Gemini config
 # -------------------------
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-GEM_MODEL = genai.GenerativeModel("gemini-2.0-flash")
-# ---------- basic logging ----------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+try:
+    import google.generativeai as genai
 
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    GEM_MODEL = genai.GenerativeModel("gemini-2.0-flash")
+except Exception:
+    genai = None
+    GEM_MODEL = None
+
+
+# -------------------------
+# Flask app
+# -------------------------
 app = Flask(__name__)
 CORS(app)
 
-# Detect platform and choose correct Stockfish binary path
-if os.name == "nt":
-    # WINDOWS
-    STOCKFISH_PATH = os.path.join(os.path.dirname(__file__), "stockfish", "stockfish.exe")
-elif os.path.exists("/opt/homebrew/bin/stockfish"):
-    # MAC (M1/M2/M4)
-    STOCKFISH_PATH = "/opt/homebrew/bin/stockfish"
-elif os.path.exists("/usr/bin/stockfish"):
-    STOCKFISH_PATH = "/usr/bin/stockfish"
-else:
-    raise FileNotFoundError("Could not find Stockfish binary for your system.")
 
-executor = ThreadPoolExecutor(max_workers=2)
+# -------------------------
+# Stockfish / engine helpers
+# -------------------------
+def get_stockfish_path() -> str:
+    """Return a Stockfish binary path, trying env var first."""
+    env_path = os.getenv("STOCKFISH_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    # Windows: look for local stockfish.exe
+    if os.name == "nt":
+        candidate = os.path.join(os.getcwd(), "stockfish.exe")
+        return candidate
+
+    # macOS/Linux: assume stockfish in PATH
+    return "stockfish"
 
 
-def get_fresh_engine():
-    """Create a fresh Stockfish instance for each worker/thread."""
+ENGINE_PATH = get_stockfish_path()
+
+
+def evaluate_fen(args):
+    """
+    Worker function for multiprocessing.
+
+    args: (fen, san, index)
+    Returns dict:
+      {
+        "fen": fen,
+        "san": san,
+        "move_index": index,
+        "score": float pawns,
+        "score_str": string,
+        "best_move": SAN or None
+      }
+    """
+    fen, san, index = args
+
     try:
-        return Stockfish(path=STOCKFISH_PATH, depth=18)
+        engine = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH)
     except Exception as e:
-        logging.exception("Stockfish engine creation failed")
-        raise
-
-
-def evaluate_fen(fen):
-    """
-    Evaluate a FEN using Stockfish and return:
-    - type: "cp" or "mate"
-    - value: centipawns or mate-number
-    - score (frontend numeric)
-    - eval_str ("+0.52", "-M3")
-    - pv: principal variation list
-    """
-
-    try:
-        engine = get_fresh_engine()
-        engine.set_fen_position(fen)
-
-        # FULL INFO FOR MOTIF ENGINE & FRONTEND
-        raw_eval = engine.get_evaluation()      # {"type": "cp", "value": X}
-        try:
-            info = engine.get_top_moves(3)      # each: {'Move': 'e2e4', 'Centipawn': 23}
-            pv = [m["Move"] for m in info] if info else []
-        except:
-            pv = []
-
-        if raw_eval["type"] == "cp":
-            cp = raw_eval["value"]
-            score = cp / 100.0
-            eval_str = f"{'+' if score >= 0 else ''}{score:.2f}"
-
-        elif raw_eval["type"] == "mate":
-            m = raw_eval["value"]         # mate distance
-            side = "white" if m > 0 else "black"
-            score = 10 if m > 0 else -10
-            eval_str = f"{'-' if m < 0 else ''}M{abs(m)}"
-
-        else:
-            cp = 0
-            score = 0
-            eval_str = "0.00"
-
-        # Best move
-        try:
-            best_move = engine.get_best_move()
-        except:
-            best_move = None
-
-# ---- INSERT THIS EXACTLY HERE ----
-# PV LIST FIX
-        try:
-            info = engine.get_top_moves(3)
-            pv_list = [m["Move"] for m in info] if info else []
-        except:
-            pv_list = []
-# ----------------------------------
-
-    
         return {
             "fen": fen,
-            "sf_raw": raw_eval,      # <-- SEND RAW ENGINE DATA
-            "pv": pv,                # <-- PV list for motifs
-            "score": score,
-            "eval": eval_str,
-            "best_move": best_move,
+            "san": san,
+            "move_index": index,
+            "score": 0.0,
+            "score_str": "0.00",
+            "best_move": None,
+            "engine_error": str(e),
         }
 
-
-    except Exception as e:
-        logging.exception("eval failed")
-        return {"fen": fen, "error": str(e)}
-
-
-# ----------------------
-# Lichess Opening Explorer integration (robust)
-# ----------------------
-LICHESS_BASE = "https://explorer.lichess.ovh"
-MIN_GAMES_THRESHOLD = 20   # lowered for openings; adjust as you want
-TOP_N = 2                  # top 2 moves (per your request)
-REQUEST_TIMEOUT = 5        # seconds for each HTTP request
-MAX_RETRIES = 2
-
-# Use a single session for benefit of connection pooling
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "VirtualChessCoach/1.0 (+https://example.local)",
-    "Accept": "application/json"
-})
-
-@lru_cache(maxsize=10000)
-def fetch_lichess_explorer(fen: str, db: str = "masters", play: str = None, rating: str = None):
-    """
-    Fetch opening explorer data from explorer.lichess.ovh with simple retry/backoff.
-    Returns a dict (or empty dict on failure).
-    """
-    endpoint_map = {
-        "masters": "/masters",
-        "lichess": "/lichess",
-        "player": "/player"
-    }
-    endpoint = endpoint_map.get(db, "/masters")
-    url = f"{LICHESS_BASE}{endpoint}"
-    params = {"fen": fen}
-    if play:
-        params["play"] = play
-    if rating:
-        params["ratings"] = rating
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
-            if resp.status_code == 200:
-                try:
-                    return resp.json()
-                except ValueError:
-                    logging.warning("Non-JSON response from lichess explorer for fen=%s db=%s", fen, db)
-                    return {}
-            else:
-                logging.warning("Lichess explorer returned status %s for fen=%s db=%s", resp.status_code, fen, db)
-                # small backoff
-                if attempt < MAX_RETRIES:
-                    continue
-                return {}
-        except requests.RequestException as e:
-            logging.warning("Lichess explorer request exception (attempt %d): %s", attempt, str(e))
-            if attempt < MAX_RETRIES:
-                continue
-            return {}
-    return {}
-
-def summarize_move_entry(entry, total_games):
-    if not entry:
-        return None
-    played = entry.get("white", 0) + entry.get("black", 0) + entry.get("draws", 0)
-    total_games = total_games or 1
-    popularity = (played / total_games * 100.0) if total_games > 0 else 0.0
-    total_outcomes = played if played > 0 else 1
-    white_win_rate = entry.get("white", 0) / total_outcomes * 100.0
-    black_win_rate = entry.get("black", 0) / total_outcomes * 100.0
-    draw_rate = entry.get("draws", 0) / total_outcomes * 100.0
-    return {
-        "uci": entry.get("uci"),
-        "san": entry.get("san"),
-        "played": played,
-        "popularity_pct": round(popularity, 2),
-        "white_win_pct": round(white_win_rate, 2),
-        "black_win_pct": round(black_win_rate, 2),
-        "draw_pct": round(draw_rate, 2),
-        "avg_rating": entry.get("averageRating")
-    }
-
-def get_top_moves_with_continuations(fen: str, db: str = "masters", top_n: int = TOP_N):
-    """
-    Returns top_n moves for the given fen from the specified db and one-ply continuation summaries.
-    """
-    data = fetch_lichess_explorer(fen, db=db)
-    if not isinstance(data, dict):
-        data = {}
-
-    moves = data.get("moves", []) or []
-    # compute total games at this node from data if possible
-    total_games = 0
     try:
-        # each move has counts; fallback to data['totalGames']
-        total_games = sum((m.get("white", 0) + m.get("black", 0) + m.get("draws", 0)) for m in moves) or data.get("totalGames", 0) or 0
-    except Exception:
-        total_games = data.get("totalGames", 0) or 0
+        board = chess.Board(fen)
+        info = engine.analyse(board, chess.engine.Limit(depth=15))
 
-    results = []
-    for m in moves[:top_n]:
+        score_obj = info["score"].pov(chess.WHITE)
+        cp = score_obj.score(mate_score=100000)
+
+        # convert to pawns
+        score_pawns = cp / 100.0
+        score_str = f"{score_pawns:.2f}"
+
+        # get best move from PV
+        best_move_san = None
+        pv = info.get("pv")
+        if pv:
+            mv = pv[0]
+            try:
+                best_move_san = board.san(mv)
+            except Exception:
+                best_move_san = mv.uci()
+
+        return {
+            "fen": fen,
+            "san": san,
+            "move_index": index,
+            "score": score_pawns,
+            "score_str": score_str,
+            "best_move": best_move_san,
+        }
+
+    finally:
         try:
-            summary = summarize_move_entry(m, total_games)
-            # fetch continuation (one-ply deeper) using play param (uci string)
-            cont_data = fetch_lichess_explorer(fen, db=db, play=m.get("uci"))
-            cont_moves = (cont_data.get("moves", []) if isinstance(cont_data, dict) else []) or []
-            cont_tot = sum((c.get("white",0)+c.get("black",0)+c.get("draws",0)) for c in cont_moves) or 1
-            cont_summaries = [summarize_move_entry(cm, cont_tot) for cm in cont_moves[:top_n]]
-            summary["continuation"] = cont_summaries
-            results.append(summary)
+            engine.quit()
         except Exception:
-            logging.exception("Error summarizing move from lichess data")
-            continue
-
-    reliable = total_games >= MIN_GAMES_THRESHOLD
-    return {"total_games": total_games, "moves": results, "reliable": reliable}
-
-def compute_theory_deviation(fen: str, last_move_uci: str):
-    """
-    Query masters and lichess/player dbs and compute a small theory object.
-    """
-    masters = get_top_moves_with_continuations(fen, db="masters", top_n=TOP_N)
-    players = get_top_moves_with_continuations(fen, db="lichess", top_n=TOP_N)
-
-    masters_uci_list = [m.get("uci") for m in masters.get("moves", []) if m and m.get("uci")]
-    players_uci_list = [m.get("uci") for m in players.get("moves", []) if m and m.get("uci")]
-
-    is_theory_move = last_move_uci in masters_uci_list if last_move_uci else False
-
-    severity = "none"
-    if not is_theory_move:
-        if not masters.get("reliable", False):
-            severity = "unknown-reliability"
-        else:
-            popularity = 0.0
-            for m in masters.get("moves", []):
-                if m.get("uci") == last_move_uci:
-                    popularity = m.get("popularity_pct", 0.0)
-                    break
-            if popularity == 0.0:
-                severity = "major-deviance"
-            elif popularity < 5.0:
-                severity = "minor-deviance"
-            else:
-                severity = "moderate-deviance"
-    else:
-        severity = "in-book"
-
-    return {
-        "masters": masters,
-        "players": players,
-        "is_in_masters_top": is_theory_move,
-        "severity": severity
-    }
-
-# ----------------------
-# Main Flask endpoints
-# ----------------------
-
-# -------------------------
-# GEMINI ENDPOINT
-# -------------------------
-@app.route("/api/gemini_summary", methods=["POST"])
-def gemini_summary():
-    data = request.get_json()
-    evaluations = data.get("evaluations", [])
-
-    limited = evaluations[:15]  # first 15 moves
-
-    prompt = "Analyze the following chess positions.\n"
-    prompt += "For each move, explain the strategy, ideas, and mistakes.\n\n"
-
-    for ev in limited:
-        prompt += f"Move {ev['move_number']} — Eval {ev['eval']}\n"
-        prompt += f"FEN: {ev['fen']}\n"
-        prompt += f"Best move: {ev['best_move']}\n\n"
-
-    try:
-        response = GEM_MODEL.generate_content(prompt)
-        return jsonify({"analysis": response.text})
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+            pass
 
 
 # -------------------------
-# FULL PGN EVALUATION
+# /api/evaluate_pgn
 # -------------------------
 @app.route("/api/evaluate_pgn", methods=["POST"])
 def evaluate_pgn():
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+    """
+    Accepts multipart/form-data with key 'file' (a PGN).
 
-    file = request.files["file"]
+    Returns JSON:
+      {
+        "count": N,
+        "evaluations": [
+          {
+            "fen": "...",
+            "san": "e4",
+            "move_index": 0,
+            "move_number": 1,
+            "score": 0.23,
+            "score_str": "0.23",
+            "best_move": "c5",
+            "motifs": [...],      # from motifs.py (list of dicts or strings)
+            "eval_delta": 12.0    # in centipawns, relative to previous move
+          },
+          ...
+        ]
+      }
+    """
     try:
-        pgn_text = file.read().decode("utf-8")
-    except Exception:
-        pgn_text = file.read().decode(errors="ignore")
+        if "file" not in request.files:
+            return jsonify({"error": "No PGN file uploaded under key 'file'."}), 400
 
-    # -----------------------------
-    # Parse PGN
-    # -----------------------------
-    try:
-        game = chess.pgn.read_game(io.StringIO(pgn_text))
+        raw = request.files["file"].read().decode("utf-8", errors="ignore")
+        game = chess.pgn.read_game(io.StringIO(raw))
         if game is None:
-            return jsonify({"error": "Could not parse PGN"}), 400
+            return jsonify({"error": "Unable to parse PGN."}), 400
 
         board = game.board()
-        MAX_FULLMOVES = 10
+        move_data = []
 
-        fens = []
-        last_move_uci_list = []
+        # build list of (san, fen-after-move)
+        for mv in game.mainline_moves():
+            san = board.san(mv)
+            board.push(mv)
+            move_data.append({"san": san, "fen": board.fen()})
 
-        for move in game.mainline_moves():
-            board.push(move)
-            fens.append(board.fen())
-            last_move_uci_list.append(move.uci())
+        if not move_data:
+            return jsonify({"count": 0, "evaluations": []}), 200
 
-            if board.fullmove_number > MAX_FULLMOVES:
-                break
+        eval_args = [(md["fen"], md["san"], idx) for idx, md in enumerate(move_data)]
 
-        if not fens:
-            return jsonify({"count": 0, "evaluations": []})
+        with Pool(processes=max(1, cpu_count() - 1)) as pool:
+            raw_results = pool.map(evaluate_fen, eval_args)
+
+        # Attach motifs + eval_delta (in centipawns)
+        final_results = []
+        prev_eval_cp = None
+
+        for i, r in enumerate(raw_results):
+            cp_now = r["score"] * 100.0
+            eval_delta = None if prev_eval_cp is None else cp_now - prev_eval_cp
+
+            try:
+                b = chess.Board(r["fen"])
+                motifs = detect_motifs(
+                    b,
+                    move_number=i + 1,
+                    eval=cp_now,
+                    prev_eval=prev_eval_cp,
+                )
+            except Exception:
+                motifs = []
+
+            annotated = dict(r)
+            annotated["move_number"] = i + 1
+            annotated["motifs"] = motifs
+            annotated["eval_delta"] = eval_delta
+
+            final_results.append(annotated)
+            prev_eval_cp = cp_now
+
+        return jsonify({"count": len(final_results), "evaluations": final_results}), 200
 
     except Exception as e:
-        logging.exception("PGN parsing failed")
         return jsonify({"error": str(e)}), 500
-
-    # -----------------------------
-    # Evaluate positions with Stockfish
-    # -----------------------------
-    try:
-        with Pool(processes=max(1, cpu_count() - 1)) as pool:
-            results = pool.map(evaluate_fen, fens)
-    except Exception:
-        logging.exception("Parallel Stockfish evaluation failed, falling back to sequential")
-        results = [evaluate_fen(f) for f in fens]
-
-    # -----------------------------
-    # Post-processing + motif detection
-    # -----------------------------
-    prev_eval = None
-    analysis_board = game.board()
-
-    for i, r in enumerate(results):
-        r["move_number"] = i + 1
-        fen = r.get("fen")
-
-        # Numeric eval → cp
-        numeric_eval = None
-        if isinstance(r.get("score"), (int, float)):
-            numeric_eval = int(r["score"] * 100)
-
-        # CAPTURE moves BEFORE set_fen()
-        # Correct move wiring
-        current_uci = last_move_uci_list[i] if i < len(last_move_uci_list) else None
-        prev_uci = last_move_uci_list[i-1] if i > 0 else None
-        prev_board = analysis_board.copy()
-
-
-
-        # Load FEN (clears history)
-        try:
-            analysis_board.set_fen(fen)
-            r["ply_index"] = i + 1
-            r["fullmove_number"] = analysis_board.fullmove_number
-            r["side_to_move"] = "white" if analysis_board.turn == chess.WHITE else "black"
-        except Exception:
-            analysis_board = chess.Board(fen)
-
-        # SAFE MERGE SF RAW + PV
-        sf_merge = r.get("sf_raw") or {}
-        sf_merge = dict(sf_merge)
-        sf_merge["pv"] = r.get("pv", [])
-
-        # ----------------------------------------------------
-        # 🔥 RUN MOTIF DETECTION (INSIDE LOOP — THE FIX)
-        # ----------------------------------------------------
-        try:
-            motifs = detect_motifs(
-                board=analysis_board,
-                prev_board=prev_board,        # <--- NEW
-                move_number=i + 1,
-                eval_cp=numeric_eval if numeric_eval is not None else 0,
-                prev_eval=prev_eval,
-                sf_raw=sf_merge,
-                last_move_uci=current_uci,
-                prev_move_uci=prev_uci,
-            )
-            r["motifs"] = motifs
-        except Exception as e:
-            logging.exception("Motif detection error")
-            r["motifs"] = {"error": f"motif detection error: {str(e)}"}
-
-        # Eval delta
-        if numeric_eval is not None and prev_eval is not None:
-            r["eval_delta"] = numeric_eval - prev_eval
-        else:
-            r["eval_delta"] = None
-
-        # -----------------------------
-        # LICHESS THEORY
-        # -----------------------------
-        try:
-            theory = compute_theory_deviation(fen, current_uci)
-            r["lichess"] = {
-                "masters": theory.get("masters"),
-                "players": theory.get("players"),
-                "is_in_masters_top": theory.get("is_in_masters_top"),
-                "severity": theory.get("severity"),
-            }
-        except Exception as e:
-            logging.exception("Lichess fetch error")
-            r["lichess"] = {"error": f"lichess fetch error: {str(e)}"}
-
-        # Save eval for next iteration
-        if numeric_eval is not None:
-            prev_eval = numeric_eval
-
-    return jsonify({"count": len(results), "evaluations": results})
-
-
 
 
 # -------------------------
-# SINGLE POSITION EVAL
+# /api/coach (single FEN eval – optional)
 # -------------------------
 @app.route("/api/coach", methods=["POST"])
-def analyze_position():
-    data = request.get_json()
-    if not data or "fen" not in data:
-        return jsonify({"error": "Missing FEN"}), 400
-
-    fen = data["fen"]
-
-    def run_stockfish_eval(fen):
-        engine = get_fresh_engine()
-        engine.set_fen_position(fen)
-        return engine.get_evaluation()
-
+def coach():
+    """
+    Very small helper: evaluate a single FEN.
+    Expects JSON: { "fen": "<FEN>" }
+    Returns: { "eval": "+0.45", "numeric": 0.45, "best_move": "Nf3" }
+    """
     try:
-        future = executor.submit(run_stockfish_eval, fen)
-        evaluation = future.result(timeout=5)
+        data = request.get_json() or {}
+        fen = data.get("fen")
+        if not fen:
+            return jsonify({"error": "Missing 'fen' in body"}), 400
 
-        # Normalize eval
-        if evaluation["type"] == "cp":
-            cp = evaluation["value"]
-            score = cp / 100.0
-            eval_str = f"{'+' if score >= 0 else ''}{score:.2f}"
-
-        elif evaluation["type"] == "mate":
-            m = evaluation["value"]
-            score = 10 if m > 0 else -10
-            eval_str = f"{'-' if m < 0 else ''}M{abs(m)}"
-        else:
-            score = 0
-            eval_str = "0.00"
-
-        # Best move + PV
-        stockfish = get_fresh_engine()
-        stockfish.set_fen_position(fen)
-
+        board = chess.Board(fen)
+        engine = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH)
         try:
-            best_move = stockfish.get_best_move()
-        except:
-            best_move = None
+            info = engine.analyse(board, chess.engine.Limit(depth=15))
+            score_obj = info["score"].pov(chess.WHITE)
+            cp = score_obj.score(mate_score=100000)
+            score_pawns = cp / 100.0
 
-        # PV LIST FIX
-        try:
-            info = stockfish.get_top_moves(3)
-            pv_list = [m["Move"] for m in info] if info else []
-        except:
-            pv_list = []
+            if abs(cp) >= 100000:
+                eval_str = "Mate"
+            else:
+                eval_str = f"{score_pawns:.2f}"
 
-        # Lichess data
-        try:
-            masters = get_top_moves_with_continuations(fen, db="masters", top_n=TOP_N)
-            players = get_top_moves_with_continuations(fen, db="lichess", top_n=TOP_N)
-            theory = {"masters": masters, "players": players, "is_in_masters_top": False}
-        except:
-            logging.exception("Lichess fetch failed in /api/coach")
-            theory = {"error": "lichess fetch failed"}
+            best_move_san = None
+            pv = info.get("pv")
+            if pv:
+                mv = pv[0]
+                try:
+                    best_move_san = board.san(mv)
+                except Exception:
+                    best_move_san = mv.uci()
 
-        return jsonify({
-            "eval": eval_str,
-            "numeric_eval": evaluation.get("value", 0),
-            "best_move": best_move,
-            "ideas": [
-                f"Stockfish suggests {best_move} as the best move." if best_move else "Stockfish gave no best move.",
-                "Keep your pieces active and king safe.",
-                "Look for tactical opportunities."
-            ],
-            "lichess": theory,
-            "sf_raw": evaluation,
-            "pv": pv_list
-        })
+            return jsonify(
+                {"eval": eval_str, "numeric": score_pawns, "best_move": best_move_san}
+            ), 200
+        finally:
+            try:
+                engine.quit()
+            except Exception:
+                pass
 
     except Exception as e:
-        logging.exception("/api/coach failed")
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/motifs", methods=["POST"])
-def motifs_endpoint():
-    data = request.get_json() or {}
+# -------------------------
+# /api/gemini_move (per-ply explanation)
+# -------------------------
+@app.route("/api/gemini_move", methods=["POST"])
+def gemini_move():
+    """
+    Explain ONE half-move (ply) in 2–3 sentences.
 
-    fen = data.get("fen")
-    if not fen:
-        return jsonify({"error": "Missing fen"}), 400
+    Expects JSON:
+      {
+        "move_index": 0,
+        "full_move_number": 1,
+        "color": "White"|"Black",
+        "san": "Ng5",
+        "score_before": 0.2,
+        "score_after": -5.3,
+        "best_move": "d5" or null,
+        "motifs": [ ... ]   # list of strings or dicts from detect_motifs
+      }
+
+    Returns:
+      { "summary": "<plain text>" }
+    """
+    if GEM_MODEL is None:
+        return jsonify({"error": "Gemini model is not configured on the server."}), 500
 
     try:
-        # Current board
-        board = chess.Board(fen)
+        data = request.get_json() or {}
 
-        # -------------------------
-        # NEW: previous board via prev_fen
-        # -------------------------
-        prev_fen = data.get("prev_fen")
-        prev_board = chess.Board(prev_fen) if prev_fen else None
-
-        # -------------------------
-        # Normalize eval → eval_cp in centipawns
-        # -------------------------
-        raw_eval = data.get("eval", 0)
-
-        if isinstance(raw_eval, str):
-            try:
-                eval_cp = int(float(raw_eval) * 100)
-            except:
-                eval_cp = 0
-        else:
-            try:
-                eval_cp = int(raw_eval)
-            except:
-                eval_cp = 0
-
-        prev_eval = data.get("prev_eval")
-        sf_raw = data.get("sf_raw") or {}
-
-        # Move wiring sent from frontend
-        last_uci = data.get("last_move_uci")
-        prev_uci = data.get("prev_move_uci")
-
-        move_number = data.get("move_number", board.fullmove_number)
-
-        # -------------------------
-        # Run motif detection
-        # -------------------------
-        motifs = detect_motifs(
-            board=board,
-            prev_board=prev_board,          # <-- CRITICAL
-            move_number=move_number,
-            eval_cp=eval_cp,
-            prev_eval=prev_eval,
-            sf_raw=sf_raw,
-            last_move_uci=last_uci,
-            prev_move_uci=prev_uci,
+        move_index = data.get("move_index")
+        full_move_number = data.get("full_move_number") or 0
+        color = data.get("color") or (
+            "White" if (isinstance(move_index, int) and move_index % 2 == 0) else "Black"
         )
 
-        return jsonify({"motifs": motifs})
+        san = data.get("san") or "this move"
+        score_before = data.get("score_before")
+        score_after = data.get("score_after")
+        best_move = data.get("best_move") or "No clearly better move found."
+        motifs = data.get("motifs") or []
+
+        # numeric delta
+        delta = None
+        if isinstance(score_before, (int, float)) and isinstance(score_after, (int, float)):
+            delta = score_after - score_before
+
+        # turn motifs (which may be dicts) into short labels
+        motif_labels = []
+        for m in motifs:
+            if isinstance(m, str):
+                motif_labels.append(m)
+            elif isinstance(m, dict):
+                # common keys from motifs.py: "name", "type", maybe "detail"
+                label = (
+                    m.get("name")
+                    or m.get("type")
+                    or m.get("id")
+                    or str(m)
+                )
+                motif_labels.append(label)
+            else:
+                motif_labels.append(str(m))
+
+        motifs_str = ", ".join(motif_labels) if motif_labels else "None"
+
+        prompt = f"""
+You are a chess coach for a beginner–intermediate player (around 800–1500 Elo).
+
+You are explaining a SINGLE move (a half-move) from the opening phase.
+
+Full move number: {full_move_number}
+Side that played the move: {color}
+Move played: {san}
+
+Evaluation in pawns:
+- Before the move: {score_before}
+- After the move:  {score_after}
+- Change in evaluation: {delta}
+
+Engine's better move (if any): {best_move}
+Detected motifs (tactical/positional ideas): {motifs_str}
+
+Your task:
+- In 2–3 short, clear sentences, explain this one move only.
+- Say whether it is strong, normal, inaccurate, a mistake, or a blunder (based on eval change).
+- Explain WHY the eval changed in human terms, using motifs when relevant (forks, hanging pieces, weak squares, king safety, etc.).
+- If the best move is clearly better, briefly explain what it would have achieved.
+- Do NOT mention other moves from the game.
+- Do NOT output JSON; answer in plain English only.
+"""
+
+        try:
+            result = GEM_MODEL.generate_content(prompt)
+            text = getattr(result, "text", "").strip() or "No explanation available."
+            return jsonify({"summary": text}), 200
+        except Exception as model_exc:
+            # Handle quota / 429 etc. more nicely
+            msg = str(model_exc)
+            if "429" in msg or "quota" in msg.lower():
+                return jsonify(
+                    {
+                        "error": "Gemini quota or rate limit exceeded. Please wait or reduce requests."
+                    }
+                ), 429
+            return jsonify({"error": msg}), 500
 
     except Exception as e:
-        logging.exception("motifs endpoint error")
         return jsonify({"error": str(e)}), 500
-
-
-
 
 
 if __name__ == "__main__":
-    logging.info("Starting Virtual Chess Coach backend on 127.0.0.1:5000")
+    print("Using engine at:", ENGINE_PATH)
+    print("Gemini configured:", GEM_MODEL is not None)
     app.run(host="127.0.0.1", port=5000, debug=True)
-print("Gemini key loaded?", bool(os.getenv("GEMINI_API_KEY")))
