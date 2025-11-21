@@ -42,42 +42,72 @@ def get_fresh_engine():
         raise
 
 def evaluate_fen(fen):
-    """Worker function for multiprocessing — runs one Stockfish eval and returns normalized structure."""
+    """
+    Evaluate a FEN using Stockfish and return:
+    - type: "cp" or "mate"
+    - value: centipawns or mate-number
+    - score (frontend numeric)
+    - eval_str ("+0.52", "-M3")
+    - pv: principal variation list
+    """
+
     try:
         engine = get_fresh_engine()
         engine.set_fen_position(fen)
-        info = engine.get_evaluation()
 
-        # normalize evaluation
-        if isinstance(info, dict) and info.get("type") == "cp":
-            score = info.get("value", 0) / 100.0
+        # FULL INFO FOR MOTIF ENGINE & FRONTEND
+        raw_eval = engine.get_evaluation()      # {"type": "cp", "value": X}
+        try:
+            info = engine.get_top_moves(3)      # each: {'Move': 'e2e4', 'Centipawn': 23}
+            pv = [m["Move"] for m in info] if info else []
+        except:
+            pv = []
+
+        if raw_eval["type"] == "cp":
+            cp = raw_eval["value"]
+            score = cp / 100.0
             eval_str = f"{'+' if score >= 0 else ''}{score:.2f}"
-        elif isinstance(info, dict) and info.get("type") == "mate":
-            # some stockfish versions use 'mate' type
-            mv = info.get("value")
-            eval_str = f"Mate in {mv}"
-            score = 10 if mv and mv > 0 else -10
-        else:
-            # fallback
-            eval_str = "0.00"
-            score = 0.0
 
-        best_move = None
+        elif raw_eval["type"] == "mate":
+            m = raw_eval["value"]         # mate distance
+            side = "white" if m > 0 else "black"
+            score = 10 if m > 0 else -10
+            eval_str = f"{'-' if m < 0 else ''}M{abs(m)}"
+
+        else:
+            cp = 0
+            score = 0
+            eval_str = "0.00"
+
+        # Best move
         try:
             best_move = engine.get_best_move()
-        except Exception:
-            # non-fatal
+        except:
             best_move = None
 
+# ---- INSERT THIS EXACTLY HERE ----
+# PV LIST FIX
+        try:
+            info = engine.get_top_moves(3)
+            pv_list = [m["Move"] for m in info] if info else []
+        except:
+            pv_list = []
+# ----------------------------------
+
+    
         return {
             "fen": fen,
+            "sf_raw": raw_eval,      # <-- SEND RAW ENGINE DATA
+            "pv": pv,                # <-- PV list for motifs
             "score": score,
             "eval": eval_str,
             "best_move": best_move,
         }
+
     except Exception as e:
-        logging.exception("evaluate_fen failed for fen: %s", fen)
+        logging.exception("eval failed")
         return {"fen": fen, "error": str(e)}
+
 
 # ----------------------
 # Lichess Opening Explorer integration (robust)
@@ -244,29 +274,38 @@ def evaluate_pgn():
     except Exception:
         pgn_text = file.read().decode(errors="ignore")
 
+    # -----------------------------
+    # Parse PGN
+    # -----------------------------
     try:
         game = chess.pgn.read_game(io.StringIO(pgn_text))
         if game is None:
             return jsonify({"error": "Could not parse PGN"}), 400
-        board = game.board()
 
-        # Collect up to first 10 move FENs + last-move ucis (MVP limit)
+        board = game.board()
+        MAX_FULLMOVES = 10
+
         fens = []
         last_move_uci_list = []
-        for i, move in enumerate(game.mainline_moves()):
-            if i >= 10:
-                break
+
+        for move in game.mainline_moves():
             board.push(move)
             fens.append(board.fen())
             last_move_uci_list.append(move.uci())
 
+            if board.fullmove_number > MAX_FULLMOVES:
+                break
+
         if not fens:
             return jsonify({"count": 0, "evaluations": []})
+
     except Exception as e:
         logging.exception("PGN parsing failed")
         return jsonify({"error": str(e)}), 500
 
-    # 1) Run Stockfish evaluations in parallel
+    # -----------------------------
+    # Evaluate positions with Stockfish
+    # -----------------------------
     try:
         with Pool(processes=max(1, cpu_count() - 1)) as pool:
             results = pool.map(evaluate_fen, fens)
@@ -274,57 +313,92 @@ def evaluate_pgn():
         logging.exception("Parallel Stockfish evaluation failed, falling back to sequential")
         results = [evaluate_fen(f) for f in fens]
 
-    # 2) Post-process results in main process
+    # -----------------------------
+    # Post-processing + motif detection
+    # -----------------------------
     prev_eval = None
     analysis_board = game.board()
 
     for i, r in enumerate(results):
         r["move_number"] = i + 1
-
         fen = r.get("fen")
-        numeric_eval = None
-        if "score" in r and isinstance(r["score"], (int, float)):
-            numeric_eval = r["score"] * 100
 
+        # Numeric eval → cp
+        numeric_eval = None
+        if isinstance(r.get("score"), (int, float)):
+            numeric_eval = int(r["score"] * 100)
+
+        # CAPTURE moves BEFORE set_fen()
+        # Correct move wiring
+        current_uci = last_move_uci_list[i] if i < len(last_move_uci_list) else None
+        prev_uci = last_move_uci_list[i-1] if i > 0 else None
+        prev_board = analysis_board.copy()
+
+
+
+        # Load FEN (clears history)
         try:
             analysis_board.set_fen(fen)
+            r["ply_index"] = i + 1
+            r["fullmove_number"] = analysis_board.fullmove_number
+            r["side_to_move"] = "white" if analysis_board.turn == chess.WHITE else "black"
         except Exception:
             analysis_board = chess.Board(fen)
 
-        analysis_board.last_move_uci = last_move_uci_list[i] if i < len(last_move_uci_list) else None
+        # SAFE MERGE SF RAW + PV
+        sf_merge = r.get("sf_raw") or {}
+        sf_merge = dict(sf_merge)
+        sf_merge["pv"] = r.get("pv", [])
 
-        # Run motif detection (robust)
+        # ----------------------------------------------------
+        # 🔥 RUN MOTIF DETECTION (INSIDE LOOP — THE FIX)
+        # ----------------------------------------------------
         try:
             motifs = detect_motifs(
-                analysis_board,
+                board=analysis_board,
+                prev_board=prev_board,        # <--- NEW
                 move_number=i + 1,
-                eval=numeric_eval if numeric_eval is not None else 0,
-                prev_eval=prev_eval
+                eval_cp=numeric_eval if numeric_eval is not None else 0,
+                prev_eval=prev_eval,
+                sf_raw=sf_merge,
+                last_move_uci=current_uci,
+                prev_move_uci=prev_uci,
             )
+
+            r["motifs"] = motifs
         except Exception as e:
             logging.exception("Motif detection error")
-            motifs = {"error": f"motif detection error: {str(e)}"}
+            r["motifs"] = {"error": f"motif detection error: {str(e)}"}
 
-        r["motifs"] = motifs
-        r["eval_delta"] = None if prev_eval is None or numeric_eval is None else numeric_eval - prev_eval
+        # Eval delta
+        if numeric_eval is not None and prev_eval is not None:
+            r["eval_delta"] = numeric_eval - prev_eval
+        else:
+            r["eval_delta"] = None
 
-        # Lichess theory deviation
+        # -----------------------------
+        # LICHESS THEORY
+        # -----------------------------
         try:
-            theory = compute_theory_deviation(fen, analysis_board.last_move_uci)
+            theory = compute_theory_deviation(fen, current_uci)
             r["lichess"] = {
                 "masters": theory.get("masters"),
                 "players": theory.get("players"),
                 "is_in_masters_top": theory.get("is_in_masters_top"),
-                "severity": theory.get("severity")
+                "severity": theory.get("severity"),
             }
         except Exception as e:
             logging.exception("Lichess fetch error")
             r["lichess"] = {"error": f"lichess fetch error: {str(e)}"}
 
+        # Save eval for next iteration
         if numeric_eval is not None:
             prev_eval = numeric_eval
 
     return jsonify({"count": len(results), "evaluations": results})
+
+
+
 
 @app.route("/api/coach", methods=["POST"])
 def analyze_position():
@@ -343,61 +417,119 @@ def analyze_position():
         future = executor.submit(run_stockfish_eval, fen)
         evaluation = future.result(timeout=5)
 
-        if isinstance(evaluation, dict) and evaluation.get("type") == "cp":
-            score = evaluation.get("value", 0) / 100.0
+        # Normalize eval
+        if evaluation["type"] == "cp":
+            cp = evaluation["value"]
+            score = cp / 100.0
             eval_str = f"{'+' if score >= 0 else ''}{score:.2f}"
-        elif isinstance(evaluation, dict) and evaluation.get("type") in ("mate",):
-            eval_str = f"Mate in {evaluation.get('value')}"
+
+        elif evaluation["type"] == "mate":
+            m = evaluation["value"]
+            score = 10 if m > 0 else -10
+            eval_str = f"{'-' if m < 0 else ''}M{abs(m)}"
         else:
+            score = 0
             eval_str = "0.00"
 
+        # Best move + PV
         stockfish = get_fresh_engine()
         stockfish.set_fen_position(fen)
-        best_move = None
+
         try:
             best_move = stockfish.get_best_move()
-        except Exception:
+        except:
             best_move = None
 
+        # PV LIST FIX
+        try:
+            info = stockfish.get_top_moves(3)
+            pv_list = [m["Move"] for m in info] if info else []
+        except:
+            pv_list = []
+
+        # Lichess data
         try:
             masters = get_top_moves_with_continuations(fen, db="masters", top_n=TOP_N)
             players = get_top_moves_with_continuations(fen, db="lichess", top_n=TOP_N)
             theory = {"masters": masters, "players": players, "is_in_masters_top": False}
-        except Exception:
+        except:
             logging.exception("Lichess fetch failed in /api/coach")
             theory = {"error": "lichess fetch failed"}
 
         return jsonify({
             "eval": eval_str,
-            "numeric_eval": evaluation.get("value") if isinstance(evaluation, dict) else 0,
+            "numeric_eval": evaluation.get("value", 0),
             "best_move": best_move,
             "ideas": [
                 f"Stockfish suggests {best_move} as the best move." if best_move else "Stockfish gave no best move.",
                 "Keep your pieces active and king safe.",
                 "Look for tactical opportunities."
             ],
-            "lichess": theory
+            "lichess": theory,
+            "sf_raw": evaluation,
+            "pv": pv_list
         })
+
     except Exception as e:
         logging.exception("/api/coach failed")
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/motifs", methods=["POST"])
 def motifs_endpoint():
     data = request.get_json() or {}
-    fen = data.get("fen")
 
+    fen = data.get("fen")
     if not fen:
         return jsonify({"error": "Missing fen"}), 400
 
     try:
+        # Current board
         board = chess.Board(fen)
 
+        # -------------------------
+        # NEW: previous board via prev_fen
+        # -------------------------
+        prev_fen = data.get("prev_fen")
+        prev_board = chess.Board(prev_fen) if prev_fen else None
+
+        # -------------------------
+        # Normalize eval → eval_cp in centipawns
+        # -------------------------
+        raw_eval = data.get("eval", 0)
+
+        if isinstance(raw_eval, str):
+            try:
+                eval_cp = int(float(raw_eval) * 100)
+            except:
+                eval_cp = 0
+        else:
+            try:
+                eval_cp = int(raw_eval)
+            except:
+                eval_cp = 0
+
+        prev_eval = data.get("prev_eval")
+        sf_raw = data.get("sf_raw") or {}
+
+        # Move wiring sent from frontend
+        last_uci = data.get("last_move_uci")
+        prev_uci = data.get("prev_move_uci")
+
+        move_number = data.get("move_number", board.fullmove_number)
+
+        # -------------------------
+        # Run motif detection
+        # -------------------------
         motifs = detect_motifs(
             board=board,
-            move_number=data.get("move_number", board.fullmove_number),
-            eval=data.get("eval", 0),
-            prev_eval=data.get("prev_eval"),
+            prev_board=prev_board,          # <-- CRITICAL
+            move_number=move_number,
+            eval_cp=eval_cp,
+            prev_eval=prev_eval,
+            sf_raw=sf_raw,
+            last_move_uci=last_uci,
+            prev_move_uci=prev_uci,
         )
 
         return jsonify({"motifs": motifs})
@@ -405,6 +537,7 @@ def motifs_endpoint():
     except Exception as e:
         logging.exception("motifs endpoint error")
         return jsonify({"error": str(e)}), 500
+
 
 
 

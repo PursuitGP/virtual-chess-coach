@@ -83,8 +83,10 @@ export default function App() {
   const [plyIndex, setPlyIndex] = useState(0);
 
   //Eval
-  const [evaluation, setEvaluation] = useState(0);
+  //Eval
+  const [evaluation, setEvaluation] = useState(0); // numeric for bar height
   const [allEvaluations, setAllEvaluations] = useState([]);
+  const [evalLabel, setEvalLabel] = useState("0.00"); // text shown on bar
 
   // Board size (px)
   const [boardSize, setBoardSize] = useState(600);
@@ -139,13 +141,56 @@ export default function App() {
     );
     setPlyIndex(target);
     syncFrom(replay);
-    // Trigger motif + api test for visual debugging
-    testMotifsAndAPI(replay.fen());
 
-    // ✅ Use precomputed evaluation instead of re-calling backend
+    // 🔥 Use the *explicit* ply we just computed
+    testMotifsAndAPI(replay.fen(), target);
+
+    // ✅ Evaluation logic already uses `target`
     const evalForMove = allEvaluations[target - 1];
-    if (evalForMove) setEvaluation(evalForMove.score);
-  } // classify each move by drop severity (in pawn units)
+
+    let numeric = 0;
+    let label = "0.00";
+
+    if (evalForMove) {
+      numeric = typeof evalForMove.score === "number" ? evalForMove.score : 0;
+
+      const sfRaw = evalForMove.sf_raw;
+
+      if (sfRaw && sfRaw.type === "mate") {
+        const v = typeof sfRaw.value === "number" ? sfRaw.value : 0;
+
+        if (v === 0) {
+          let sideToMove = "w";
+          try {
+            const parts = evalForMove.fen.split(" ");
+            sideToMove = parts[1] === "b" ? "b" : "w";
+          } catch {}
+
+          const winner = sideToMove === "w" ? "black" : "white";
+
+          label = winner === "white" ? "#W" : "#B";
+          numeric = winner === "white" ? 10 : -10;
+        } else {
+          const n = Math.abs(v);
+          const side = v > 0 ? "white" : "black";
+
+          label = side === "white" ? `M${n}` : `-M${n}`;
+          numeric = side === "white" ? 10 : -10;
+        }
+      } else if (
+        typeof evalForMove.eval === "string" &&
+        /^-?M\d+$/i.test(evalForMove.eval.trim())
+      ) {
+        label = evalForMove.eval.trim();
+      } else {
+        label = (numeric >= 0 ? "+" : "") + numeric.toFixed(2);
+      }
+    }
+
+    setEvaluation(numeric);
+    setEvalLabel(label);
+  }
+  // classify each move by drop severity (in pawn units)
   // --- Review Graph Computation ---
 
   const iconForColor = (color) => {
@@ -303,14 +348,23 @@ export default function App() {
         x: {
           type: "linear",
           min: 1,
-          max: allEvaluations.length,
+          max: allEvaluations.length || 1,
           grid: { display: false },
-          title: { display: true, text: "Moves" },
+          title: { display: true, text: "Ply (w/b)" },
           ticks: {
             color: "#ccc",
-            stepSize: 2, // show fewer tick marks
+            stepSize: 1,
+            callback: (value) => {
+              const ply = Number(value);
+              if (!Number.isFinite(ply) || ply < 1) return "";
+              const fullMove = Math.ceil(ply / 2);
+              const isWhite = ply % 2 === 1;
+              // 1w, 1b, 2w, 2b, ...
+              return isWhite ? `${fullMove}w` : `${fullMove}b`;
+            },
           },
         },
+
         y: {
           min: -10,
           max: 10,
@@ -321,15 +375,18 @@ export default function App() {
       plugins: {
         legend: { display: false },
         annotation: {
-          annotations: {
-            current: {
-              type: "line",
-              xMin: plyIndex + 1,
-              xMax: plyIndex + 1,
-              borderColor: "cyan",
-              borderWidth: 2,
-            },
-          },
+          annotations:
+            plyIndex > 0
+              ? {
+                  current: {
+                    type: "line",
+                    xMin: plyIndex,
+                    xMax: plyIndex,
+                    borderColor: "cyan",
+                    borderWidth: 2,
+                  },
+                }
+              : {},
         },
       },
       responsive: true,
@@ -375,11 +432,61 @@ export default function App() {
       const data = await res.json();
 
       if (data.evaluations) {
-        // ✅ Store full evaluation list for instant replay
         setAllEvaluations(data.evaluations);
-        setEvaluation(data.evaluations[0]?.score || 0);
 
-        // preload board
+        const first = data.evaluations[0];
+
+        let numeric = 0;
+        let label = "0.00";
+
+        if (first) {
+          numeric = typeof first.score === "number" ? first.score : 0;
+
+          const sfRaw = first.sf_raw;
+
+          function fenToMoveTurn(fen) {
+            try {
+              return fen.split(" ")[1] === "w" ? "w" : "b";
+            } catch {
+              return "w";
+            }
+          }
+
+          // Prefer raw Stockfish mate info if present
+          // ----- MATE EVAL -----
+          if (sfRaw && sfRaw.type === "mate") {
+            const v = typeof sfRaw.value === "number" ? sfRaw.value : 0;
+
+            // Use the ACTUAL replayed FEN (correct position)
+            let sideToMove = "w";
+            try {
+              sideToMove = replay.fen().split(" ")[1];
+            } catch {
+              sideToMove = "w";
+            }
+
+            if (v === 0) {
+              // Mate delivered on this move
+              const winner = sideToMove === "w" ? "black" : "white";
+              numeric = winner === "white" ? 10 : -10;
+              label = winner === "white" ? "#W" : "#B";
+            } else {
+              // Mate-in-N
+              const n = Math.abs(v);
+              const side = v > 0 ? "white" : "black";
+              numeric = side === "white" ? 10 : -10;
+              label = side === "white" ? `M${n}` : `-M${n}`;
+            }
+
+            setEvaluation(numeric);
+            setEvalLabel(label);
+            return;
+          }
+        }
+
+        setEvaluation(numeric);
+        setEvalLabel(label);
+
         const fresh = new Chess();
         syncFrom(fresh);
       } else {
@@ -409,15 +516,26 @@ export default function App() {
 
       // Convert eval string to numeric bar value
       let evalValue = 0;
+      let label = "0.00";
+
       if (data.eval && data.eval.includes("Mate")) {
-        evalValue = data.eval.includes("-") ? -10 : 10;
+        const m = data.eval.match(/-?\d+/);
+        if (m) {
+          const n = parseInt(m[0], 10);
+          label = n < 0 ? `-M${Math.abs(n)}` : `M${n}`;
+          evalValue = n < 0 ? -10 : 10;
+        } else {
+          label = "M";
+          evalValue = 10;
+        }
       } else if (data.eval) {
         evalValue = parseFloat(data.eval);
         if (Math.abs(evalValue) > 10) evalValue = evalValue / 100;
+        label = (evalValue >= 0 ? "+" : "") + evalValue.toFixed(2);
       }
 
-      // Smooth transition to new evaluation value
       setEvaluation(evalValue);
+      setEvalLabel(label);
 
       console.log("Eval:", evalValue, "Best move:", data.best_move);
     } catch (err) {
@@ -487,23 +605,53 @@ export default function App() {
   // Set this to whatever you want (default 20)
   const MIN_GAMES_THRESHOLD = 20;
 
-  async function testMotifsAndAPI(fen) {
+  async function testMotifsAndAPI(fen, ply) {
     setMotifLoading(true);
     setMotifError(null);
     setMotifInfo(null);
 
     try {
-      console.log("Testing motifs for:", fen);
+      console.log("Testing motifs for:", fen, "at ply", ply);
 
-      // 1) Call your backend motif detector
+      // Use the explicit ply corresponding to THIS FEN
+      const last = ply > 0 ? pgnMoves[ply - 1] : null;
+      const prev = ply > 1 ? pgnMoves[ply - 2] : null;
+      // NEW: compute previous Fen
+      let prevFen = null;
+      if (ply > 0) {
+        const replayPrev = new Chess();
+        for (let i = 0; i < ply - 1; i++) replayPrev.move(pgnMoves[i]);
+        prevFen = replayPrev.fen();
+      }
+
+      const lastUci = last && last.from && last.to ? last.from + last.to : null;
+
+      const prevUci = prev && prev.from && prev.to ? prev.from + prev.to : null;
+
+      const evalForMove = ply > 0 ? allEvaluations[ply - 1] || {} : {};
+      const numericEval =
+        typeof evalForMove.score === "number" ? evalForMove.score : 0;
+      const sfRaw = evalForMove.sf_raw || null;
+
+      const motifPayload = {
+        fen,
+        prev_fen: prevFen, // <----- NEW
+        last_move_uci: lastUci,
+        prev_move_uci: prevUci,
+        eval: numericEval,
+        sf_raw: sfRaw,
+        move_number: ply,
+      };
+
       const motifRes = await fetch("http://127.0.0.1:5000/api/motifs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fen }),
+        body: JSON.stringify(motifPayload),
       });
+
       const motifData = await motifRes.json();
 
-      // 2) Call lichess masters DB opening explorer
+      // Lichess masters explorer
       const encodedFen = encodeURIComponent(fen);
       const lichessRes = await fetch(
         `https://explorer.lichess.ovh/masters?fen=${encodedFen}&moves=10`
@@ -620,10 +768,22 @@ export default function App() {
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              gap: "5px",
+              gap: "8px",
               marginTop: "16px",
             }}
           >
+            {/* Eval label on the left, always readable */}
+            <div
+              style={{
+                minWidth: 48,
+                textAlign: "right",
+                fontSize: "16px",
+                fontWeight: "bold",
+              }}
+            >
+              {evalLabel}
+            </div>
+
             {/* Evaluation Bar */}
             <div
               className="eval-bar-container"
@@ -646,27 +806,7 @@ export default function App() {
                   height: `${Math.min(100, Math.max(0, 50 + evaluation * 5))}%`,
                   transition: "height 0.3s ease",
                 }}
-              ></div>
-
-              <div
-                style={{
-                  position: "absolute",
-                  top: `${
-                    100 - Math.min(100, Math.max(0, 50 + evaluation * 5))
-                  }%`,
-                  width: "100%",
-                  fontSize: "15px",
-                  textAlign: "center",
-                  fontWeight: "bold",
-                  //color: evaluation > 0 ? "#000000ff" : "#fff",
-                  color: "#000000ff",
-                  textShadow: "0 0 4px rgba(0, 0, 0, 0)",
-                }}
-              >
-                {evaluation > 0
-                  ? `+${evaluation.toFixed(2)}`
-                  : evaluation.toFixed(2)}
-              </div>
+              />
             </div>
 
             {/* Chessboard */}
@@ -684,6 +824,7 @@ export default function App() {
               onMove={onMove}
             />
           </div>
+
           <div
             style={{
               height: 160,
