@@ -399,9 +399,17 @@ def legal_moves_from(board, sq):
 # Motif implementations
 # -------------------------
 
-def development_lead(board, move_number, eval_cp, prev_eval=None, **kwargs):
+def development_lead(board, move_number, eval_cp, prev_eval=None, last_move_uci=None, **kwargs):
     eval_delta = compute_eval_delta(prev_eval, eval_cp)
     motifs = []
+
+    # 🚫 NEW: If last move was a KING move, skip development detection entirely.
+    if last_move_uci:
+        moved_from = chess.parse_square(last_move_uci[:2])
+        if kwargs.get("prev_board") is not None:
+            moved_piece = kwargs["prev_board"].piece_at(moved_from)
+            if moved_piece and moved_piece.piece_type == chess.KING:
+                return motifs   # <-- prevents false positives on king moves
 
     # Knights / bishops developed (off starting rank / files)
     white_knights = list(board.pieces(chess.KNIGHT, chess.WHITE))
@@ -430,6 +438,7 @@ def development_lead(board, move_number, eval_cp, prev_eval=None, **kwargs):
             )
         )
     return motifs
+
 
 def king_safety_lag(board, move_number, eval_cp, prev_eval=None, **kwargs):
     eval_delta = compute_eval_delta(prev_eval, eval_cp)
@@ -774,48 +783,6 @@ def pawn_majority(board, move_number, eval_cp, prev_eval=None, **kwargs):
             )
     return motifs
 
-def absolute_and_relative_pins(board, move_number, eval_cp, prev_eval=None, **kwargs):
-    eval_delta = compute_eval_delta(prev_eval, eval_cp)
-    motifs = []
-    for color in [chess.WHITE, chess.BLACK]:
-        enemy = not color
-        ksq = board.king(color)
-        if ksq is None:
-            continue
-        for sq in board.pieces(chess.PAWN, color) | board.pieces(chess.KNIGHT, color) | \
-                  board.pieces(chess.BISHOP, color) | board.pieces(chess.ROOK, color) | \
-                  board.pieces(chess.QUEEN, color):
-            if board.is_pinned(color, sq):
-                # Determine if absolute (pinned to king) or relative
-                # In python-chess, pinned piece is pinned to king, so treat as absolute
-                motifs.append(
-                    make_motif(
-                        "absolute_pin",
-                        "Absolute Pin",
-                        EX_ABSOLUTE_PIN,
-                        side=side_name(color),
-                        severity="info",
-                        eval_cp=eval_cp,
-                        eval_delta_cp=eval_delta,
-                        extra={"square": sq}
-                    )
-                )
-    # Relative pins are harder; do a simple ray-based heuristic:
-    for color in [chess.WHITE, chess.BLACK]:
-        enemy = not color
-        for sq in board.pieces(chess.BISHOP, enemy) | board.pieces(chess.ROOK, enemy) | board.pieces(chess.QUEEN, enemy):
-            attacker = sq
-            directions = []
-            p = board.piece_at(attacker)
-            if p.piece_type in (chess.BISHOP, chess.QUEEN):
-                directions += [chess.DIAGONAL_NORTHEAST, chess.DIAGONAL_NORTHWEST,
-                               chess.DIAGONAL_SOUTHEAST, chess.DIAGONAL_SOUTHWEST]
-            if p.piece_type in (chess.ROOK, chess.QUEEN):
-                directions += [chess.BB_FILE_A, chess.BB_FILE_H, chess.BB_RANK_1, chess.BB_RANK_8]
-            # Instead of bitboard directions, do simple geometric rays:
-            # (we'll approximate relative pins elsewhere if needed)
-            pass  # keep it simple for MVP
-    return motifs
 
 def hanging_piece(
     board,
@@ -823,15 +790,16 @@ def hanging_piece(
     move_number=None,
     eval_cp=None,
     prev_eval=None,
+    last_move_uci=None,   # <--- you already pass this in detect_motifs
     **kwargs,
 ):
-    """
-    Hanging Piece/material — a piece is more heavily attacked than it is
-    defended, meaning that in a capture sequence the defender will lose
-    material (or at least be under serious pressure).
-    """
     motifs = []
     eval_delta = compute_eval_delta(prev_eval, eval_cp)
+
+    # Extract arrival square of last move
+    arrival_sq = None
+    if last_move_uci:
+        arrival_sq = last_move_uci[2:4]   # "f7", "f2", etc.
 
     for color in (chess.WHITE, chess.BLACK):
         enemy = not color
@@ -842,14 +810,26 @@ def hanging_piece(
             attackers = board.attackers(enemy, sq)
             defenders = board.attackers(color, sq)
 
-            # Must be under attack
+            # Must be attacked
             if len(attackers) == 0:
                 continue
 
-            # "Hanging" = more attackers than defenders
+            # Must be badly defended
             if len(defenders) >= len(attackers):
                 continue
 
+            # -------------------------------------------------------
+            # SPECIAL RULE: intentional knight/bishop sacrifices on f7/f2
+            # -------------------------------------------------------
+            if arrival_sq in ("f7", "f2"):
+                if chess.square_name(sq) == arrival_sq:
+                    if piece.piece_type in (chess.KNIGHT, chess.BISHOP):
+                        # Skip ONLY for THIS move
+                        continue
+
+            # -------------------------------------------------------
+            # If not suppressed, emit normally
+            # -------------------------------------------------------
             motifs.append(
                 make_motif(
                     "hanging_piece",
@@ -864,6 +844,7 @@ def hanging_piece(
             )
 
     return motifs
+
 
 
 def fork(board, move_number, eval_cp, prev_eval=None, **kwargs):
@@ -1470,7 +1451,8 @@ EX_DISCOVERY_ATTACK = (
 )
 
 EX_DISCOVERY_ATTACK = (
-    "Discovery Attack – when a piece moves unveiling the line of sight of another piece onto a more valuable or undefended piece."
+    "Discovered Attack – a piece moves away from a line, revealing a hidden attack "
+    "from a rook, bishop, or queen onto an enemy piece."
 )
 
 def discovered_attack(
@@ -1480,112 +1462,132 @@ def discovered_attack(
     eval_cp,
     prev_eval=None,
     last_move_uci=None,
-    **_
+    **_,
 ):
     """
-    Discovered Attack THREAT — filtered version.
-    Emits ONLY discovered attacks that became relevant due to the LAST MOVE.
+    Discovered Attack —
 
-    Slider → Blocker → Target
+    Detects when the LAST MOVE removed a friendly blocker from the line
+    between a sliding piece (queen/rook/bishop) and an enemy piece, so that
+    AFTER the move the slider now directly attacks that target.
+
+    This is temporal: it only fires on the move where the discovery is
+    actually created (e.g. 5...Nxd5 revealing Qd8→Ng5 in your game).
     """
-
     motifs = []
-    if prev_board is None or last_move_uci is None:
+
+    if prev_board is None or not last_move_uci:
         return motifs
 
-    last_from = chess.parse_square(last_move_uci[:2])
-    last_to   = chess.parse_square(last_move_uci[2:4])
+    # --- 1) Identify what moved in the PREVIOUS position ---
+    moved_from_str = last_move_uci[:2]
+    moved_to_str = last_move_uci[2:4]
+    moved_from = chess.parse_square(moved_from_str)
+    moved_to = chess.parse_square(moved_to_str)
 
-    # Track squares whose rays may have changed because of the last move
-    squares_of_interest = {last_from, last_to}
+    prev_piece = prev_board.piece_at(moved_from)
+    if not prev_piece:
+        return motifs
 
-    # If the moved piece was a blocker or slider, also include its old/new rays
-    moved_piece_prev = prev_board.piece_at(last_from)
-    moved_piece_new = board.piece_at(last_to)
+    mover_color = prev_piece.color
+    enemy = not mover_color
 
-    if moved_piece_prev:
-        squares_of_interest.add(last_from)
-    if moved_piece_new:
-        squares_of_interest.add(last_to)
+    eval_delta = compute_eval_delta(prev_eval, eval_cp)
 
-    # Directions for sliders
-    directions = [
-        (1, 0), (-1, 0), (0, 1), (0, -1),
-        (1, 1), (1, -1), (-1, 1), (-1, -1)
-    ]
+    # --- 2) All SLIDERS (Q/R/B) of the same color as the moved piece, in prev_board ---
+    sliders_bb = (
+        prev_board.pieces(chess.QUEEN, mover_color)
+        | prev_board.pieces(chess.ROOK, mover_color)
+        | prev_board.pieces(chess.BISHOP, mover_color)
+    )
 
-    sliders = (chess.QUEEN, chess.ROOK, chess.BISHOP)
-    seen = set()  # prevent duplicates
+    for slider_sq in sliders_bb:
+        sf = chess.square_file(slider_sq)
+        sr = chess.square_rank(slider_sq)
+        mf = chess.square_file(moved_from)
+        mr = chess.square_rank(moved_from)
 
-    for color in [chess.WHITE, chess.BLACK]:
-        enemy = not color
+        dx = mf - sf
+        dy = mr - sr
 
-        slider_squares = (
-            board.pieces(chess.QUEEN, color)
-            | board.pieces(chess.ROOK, color)
-            | board.pieces(chess.BISHOP, color)
+        # Must be collinear along rook/ bishop / queen directions
+        if dx == 0 and dy != 0:
+            step_f, step_r = 0, 1 if dy > 0 else -1
+        elif dy == 0 and dx != 0:
+            step_f, step_r = 1 if dx > 0 else -1, 0
+        elif abs(dx) == abs(dy) and dx != 0:
+            step_f = 1 if dx > 0 else -1
+            step_r = 1 if dy > 0 else -1
+        else:
+            continue  # not on same file/rank/diagonal
+
+        # --- 3) In prev_board: slider → ... → moved_from → ... → enemy target ---
+        # First non-empty square along that ray must be moved_from.
+        f = sf + step_f
+        r = sr + step_r
+        first_piece_sq = None
+
+        while 0 <= f < 8 and 0 <= r < 8:
+            sq = chess.square(f, r)
+            p = prev_board.piece_at(sq)
+            if p:
+                first_piece_sq = sq
+                break
+            f += step_f
+            r += step_r
+
+        if first_piece_sq != moved_from:
+            continue  # the moved piece was not the direct blocker
+
+        # Now continue past moved_from to look for an enemy target
+        f = mf + step_f
+        r = mr + step_r
+        target_sq = None
+        target_piece = None
+
+        while 0 <= f < 8 and 0 <= r < 8:
+            sq = chess.square(f, r)
+            p = prev_board.piece_at(sq)
+            if p:
+                if p.color == enemy:
+                    target_sq = sq
+                    target_piece = p
+                break
+            f += step_f
+            r += step_r
+
+        if target_sq is None:
+            continue  # no enemy behind the blocker
+
+        # --- 4) AFTER the move (current board), slider must actually attack target ---
+        attackers_now = board.attackers(mover_color, target_sq)
+        if slider_sq not in attackers_now:
+            continue  # line is not really open in the current position
+
+        # ✅ We have a REAL discovered attack produced by the last move
+        motifs.append(
+            make_motif(
+                "discovered_attack",
+                "Discovered Attack",
+                EX_DISCOVERY_ATTACK,
+                side=side_name(mover_color),
+                severity="tactic",
+                eval_cp=eval_cp,
+                eval_delta_cp=eval_delta,
+                extra={
+                    "attacker": chess.square_name(slider_sq),
+                    "blocker_moved_from": chess.square_name(moved_from),
+                    "blocker_moved_to": chess.square_name(moved_to),
+                    "target": chess.square_name(target_sq),
+                    "target_piece": chess.piece_name(target_piece.piece_type)
+                    if target_piece
+                    else None,
+                },
+            )
         )
 
-        for sq in slider_squares:
-            # Skip sliders nowhere near last move’s influence
-            if sq not in squares_of_interest:
-                # also include lines where last move’s TO square might be a blocker
-                if last_to not in board.attacks(sq):
-                    continue
-
-            sf = chess.square_file(sq)
-            sr = chess.square_rank(sq)
-
-            for dx, dy in directions:
-                nf = sf + dx
-                nr = sr + dy
-
-                blocker = None
-                target = None
-
-                while 0 <= nf < 8 and 0 <= nr < 8:
-                    nsq = chess.square(nf, nr)
-                    p = board.piece_at(nsq)
-
-                    if p:
-                        if p.color == color:
-                            if blocker is None:
-                                blocker = (nsq, p)
-                            else:
-                                break
-                        else:
-                            target = (nsq, p)
-                            break
-
-                    nf += dx
-                    nr += dy
-
-                if blocker and target:
-                    key = (sq, blocker[0], target[0])
-                    if key in seen:
-                        continue
-                    seen.add(key)
-
-                    motifs.append(
-                        make_motif(
-                            "discovered_attack_threat",
-                            "Discovered Attack Threat",
-                            "A sliding piece is aligned with an enemy target, but a friendly piece blocks the line. "
-                            "If that blocker moves, a discovered attack is revealed.",
-                            side=side_name(color),
-                            severity="info",
-                            eval_cp=eval_cp,
-                            eval_delta_cp=compute_eval_delta(prev_eval, eval_cp),
-                            extra={
-                                "attacker": chess.square_name(sq),
-                                "blocker": chess.square_name(blocker[0]),
-                                "target": chess.square_name(target[0]),
-                                "target_piece": chess.piece_name(target[1].piece_type),
-                            }
-                        )
-                    )
-
     return motifs
+
 
 
 
@@ -1629,43 +1631,61 @@ EX_PIECE_SAC = (
     "or higher for a winning or advantageous position."
 )
 
-def piece_sacrifice(board, move_number, eval_cp, prev_eval=None, **kwargs):
-    eval_delta = compute_eval_delta(prev_eval, eval_cp)
+def piece_sacrifice(
+    board, prev_board, move_number, eval_cp,
+    prev_eval=None, last_move_uci=None, **_
+):
     motifs = []
 
-    last = getattr(board, "last_move_uci", None)
-    if not last:
+    if not last_move_uci or prev_board is None:
         return motifs
 
-    try:
-        m = chess.Move.from_uci(last)
-    except:
+    from_sq = chess.parse_square(last_move_uci[:2])
+    to_sq   = chess.parse_square(last_move_uci[2:4])
+
+    moved_piece = prev_board.piece_at(from_sq)
+
+    # Only knights and bishops (the classic sacrificers)
+    if not moved_piece or moved_piece.piece_type not in (chess.KNIGHT, chess.BISHOP):
         return motifs
 
-    moved_piece = board.piece_at(m.to_square)
-    if not moved_piece:
+    # Must be a capture
+    if prev_board.piece_at(to_sq) is None:
         return motifs
 
-    enemy = not moved_piece.color
+    # Must be into enemy territory
+    if moved_piece.color == chess.WHITE:
+        if chess.square_rank(to_sq) < 4:
+            return motifs
+    else:
+        if chess.square_rank(to_sq) > 3:
+            return motifs
 
-    attackers = board.attackers(enemy, m.to_square)
-    defenders = board.attackers(moved_piece.color, m.to_square)
+    # Now evaluate "hung-ness"
+    attackers = len(board.attackers(not moved_piece.color, to_sq))
+    defenders = len(board.attackers(moved_piece.color, to_sq))
+    is_hanging = attackers > defenders
 
-    if len(attackers) > len(defenders):
-        if prev_eval is not None and eval_delta >= -10:
-            motifs.append(
-                make_motif(
-                    "piece_sacrifice",
-                    "Piece Sacrifice",
-                    EX_PIECE_SAC,
-                    side=side_name(moved_piece.color),
-                    severity="brilliant",
-                    eval_cp=eval_cp,
-                    eval_delta_cp=eval_delta
-                )
+    # Must be a SOUND sacrifice (eval stays stable)
+    eval_delta = compute_eval_delta(prev_eval, eval_cp)
+    sound = abs(eval_delta) < 1.5  # tweakable
+
+    if is_hanging and sound:
+        motifs.append(
+            make_motif(
+                "sacrifice",
+                "Sound Sacrifice",
+                "A deliberate piece sacrifice to expose the king, destroy the pawn shield, or begin a forcing attack.",
+                side=side_name(moved_piece.color),
+                severity="tactical",
+                eval_cp=eval_cp,
+                eval_delta_cp=eval_delta,
+                extra={"square": chess.square_name(to_sq)},
             )
+        )
 
     return motifs
+
 
 
 # -------------------------------
@@ -1708,38 +1728,98 @@ def intermezzo(board, move_number, eval_cp, prev_eval=None, **kwargs):
 # -------------------------------
 
 EX_ATTRACTION = (
-    "Attraction – When a player lures an opponent’s piece to a more favorable square to set up a tactical idea."
+    "Attraction – When a player lures an opponent’s king onto an exposed "
+    "or tactically vulnerable square as part of a forcing combination."
 )
 
-def attraction(board, move_number, eval_cp, prev_eval=None, **kwargs):
-    eval_delta = compute_eval_delta(prev_eval, eval_cp)
+EX_ATTRACTION = (
+    "Attraction – When a player lures an opponent’s king onto an exposed "
+    "or tactically vulnerable square as part of a forcing combination."
+)
+
+def attraction(
+    board,
+    prev_board,
+    move_number,
+    eval_cp,
+    prev_eval=None,
+    last_move_uci=None,
+    prev_move_uci=None,
+    **_,
+):
+    """
+    Attraction — the king walks onto the very square where a piece was
+    just sacrificed (typically Nxf7, Bxh7+, etc.), stepping into a
+    tactically dangerous zone.
+
+    Pattern:
+      - Previous move: opponent moves a piece onto square X (often a sac).
+      - Last move: king moves to the SAME square X and captures it.
+    """
     motifs = []
 
-    last = getattr(board, "last_move_uci", None)
-    if not last:
+    if not last_move_uci or not prev_move_uci or prev_board is None:
         return motifs
 
-    try:
-        m = chess.Move.from_uci(last)
-    except:
+    # --- Last move: must be a king move ---
+    k_from_str = last_move_uci[:2]
+    k_to_str   = last_move_uci[2:4]
+
+    k_from = chess.parse_square(k_from_str)
+    k_to   = chess.parse_square(k_to_str)
+
+    moved_piece = prev_board.piece_at(k_from)
+    if not moved_piece or moved_piece.piece_type != chess.KING:
         return motifs
 
-    p = board.piece_at(m.to_square)
-    if p and p.piece_type in (chess.KING, chess.QUEEN):
-        if prev_eval is not None and eval_delta >= -20:
-            motifs.append(
-                make_motif(
-                    "attraction",
-                    "Attraction",
-                    EX_ATTRACTION,
-                    side=side_name(not p.color),
-                    severity="tactical",
-                    eval_cp=eval_cp,
-                    eval_delta_cp=eval_delta
-                )
-            )
+    king_color = moved_piece.color
+    enemy_color = not king_color
+
+    # --- Previous move: piece moved onto the SAME square the king just went to ---
+    prev_to_str = prev_move_uci[2:4]
+    if prev_to_str != k_to_str:
+        return motifs
+
+    prev_to = chess.parse_square(prev_to_str)
+    sac_piece = prev_board.piece_at(prev_to)
+
+    # Must actually be an enemy piece the king is capturing
+    if not sac_piece or sac_piece.color != enemy_color:
+        return motifs
+
+    # Typical attraction: minor/heavy piece sacrifice (N, B, R, Q)
+    if sac_piece.piece_type not in (
+        chess.KNIGHT,
+        chess.BISHOP,
+        chess.ROOK,
+        chess.QUEEN,
+    ):
+        return motifs
+
+    # --- SUCCESS: king captured the last-moved attacking piece on that square ---
+    motifs.append(
+        make_motif(
+            "attraction",
+            "Attraction",
+            "The king is pulled onto the square of a recent sacrifice, "
+            "stepping into a tactically vulnerable zone where forcing "
+            "moves (checks, forks, or mating nets) often follow.",
+            side=side_name(enemy_color),  # side who *sacrificed* and lured the king
+            severity="tactical",
+            eval_cp=eval_cp,
+            eval_delta_cp=compute_eval_delta(prev_eval, eval_cp),
+            extra={
+                "king_square": chess.square_name(k_to),
+                "sacrificed_piece": chess.piece_name(sac_piece.piece_type),
+                "sacrifice_square": chess.square_name(prev_to),
+            },
+        )
+    )
 
     return motifs
+
+
+
 
 
 # -------------------------------
@@ -2807,6 +2887,211 @@ def fair_trade_sequence_start(
 
     return motifs
 
+# ----------------------------------------------------------
+# ABSOLUTE PIN  (pinned to the KING)
+# ----------------------------------------------------------
+
+def absolute_pin(
+    board,
+    prev_board,
+    move_number,
+    eval_cp,
+    prev_eval=None,
+    **_,
+):
+    motifs = []
+    eval_delta = compute_eval_delta(prev_eval, eval_cp)
+
+    for color in (chess.WHITE, chess.BLACK):
+        king_sq = board.king(color)
+        if king_sq is None:
+            continue
+
+        # All pieces except the king can be pinned
+        for sq, piece in board.piece_map().items():
+            if piece.color != color or piece.piece_type == chess.KING:
+                continue
+
+            if board.is_pinned(color, sq):
+                motifs.append(
+                    make_motif(
+                        "absolute_pin",
+                        "Absolute Pin",
+                        EX_ABSOLUTE_PIN,
+                        side=side_name(color),
+                        severity="tactical",
+                        eval_cp=eval_cp,
+                        eval_delta_cp=eval_delta,
+                        extra={
+                            "pinned_piece": chess.square_name(sq),
+                            "king": chess.square_name(king_sq),
+                        },
+                    )
+                )
+
+    return motifs
+
+# ----------------------------------------------------------
+# RELATIVE PIN (pinned to a more valuable piece, not the king)
+# ----------------------------------------------------------
+
+def relative_pin(
+    board,
+    prev_board,
+    move_number,
+    eval_cp,
+    prev_eval=None,
+    **_,
+):
+    motifs = []
+    eval_delta = compute_eval_delta(prev_eval, eval_cp)
+
+    # sliding attackers
+    sliders = {
+        chess.BISHOP: [(1,1),(1,-1),(-1,1),(-1,-1)],
+        chess.ROOK:   [(1,0),(-1,0),(0,1),(0,-1)],
+        chess.QUEEN:  [(1,1),(1,-1),(-1,1),(-1,-1),(1,0),(-1,0),(0,1),(0,-1)],
+    }
+
+    for enemy_color in (chess.WHITE, chess.BLACK):
+        own_color = not enemy_color
+
+        for sq in (
+            board.pieces(chess.BISHOP, enemy_color)
+            | board.pieces(chess.ROOK, enemy_color)
+            | board.pieces(chess.QUEEN, enemy_color)
+        ):
+            attacker = board.piece_at(sq)
+            dirs = sliders[attacker.piece_type]
+
+            for dx, dy in dirs:
+                f = chess.square_file(sq)
+                r = chess.square_rank(sq)
+
+                blockers = []
+                behind = None
+
+                nf = f + dx
+                nr = r + dy
+
+                while 0 <= nf < 8 and 0 <= nr < 8:
+                    nsq = chess.square(nf, nr)
+                    p = board.piece_at(nsq)
+
+                    if p:
+                        if p.color == own_color:
+                            if not blockers:
+                                blockers.append((nsq, p))  # first friendly = candidate pinned piece
+                            else:
+                                # second friendly piece = higher value target (maybe)
+                                behind = (nsq, p)
+                            break
+                        else:
+                            break  # enemy piece blocks
+                    nf += dx
+                    nr += dy
+
+                # Did we find exactly one friendly blocker and a valuable friendly piece behind it?
+                if blockers and behind:
+                    block_sq, block_piece = blockers[0]
+                    behind_sq, behind_piece = behind
+
+                    # must be pinned to a more valuable piece (not king)
+                    if behind_piece.piece_type != chess.KING and \
+                       piece_value(behind_piece.piece_type) > piece_value(block_piece.piece_type):
+
+                        motifs.append(
+                            make_motif(
+                                "relative_pin",
+                                "Relative Pin",
+                                EX_RELATIVE_PIN,
+                                side=side_name(own_color),
+                                severity="info",
+                                eval_cp=eval_cp,
+                                eval_delta_cp=eval_delta,
+                                extra={
+                                    "pinned_piece": chess.square_name(block_sq),
+                                    "valuable_piece": chess.square_name(behind_sq),
+                                    "attacker": chess.square_name(sq),
+                                },
+                            )
+                        )
+
+    return motifs
+
+def fork_general(
+    board,
+    prev_board,
+    move_number,
+    eval_cp,
+    prev_eval=None,
+    **_,
+):
+    """
+    General fork detection (non-knight forks).
+    Detects queen, rook, bishop, pawn, king forks.
+
+    Key patterns:
+      - checking + attacking a valuable piece = fork
+      - OR attacking 2+ valuable pieces simultaneously
+    """
+    motifs = []
+    eval_delta = compute_eval_delta(prev_eval, eval_cp)
+
+    for color in (chess.WHITE, chess.BLACK):
+        enemy = not color
+
+        for sq, piece in board.piece_map().items():
+            if piece.color != color:
+                continue
+            if piece.piece_type == chess.KNIGHT:
+                continue  # handled by your original fork()
+
+            attacks = board.attacks(sq)
+
+            king_attacked = False
+            valuable_count = 0
+
+            for t in attacks:
+                p = board.piece_at(t)
+                if not p or p.color != enemy:
+                    continue
+
+                if p.piece_type == chess.KING:
+                    king_attacked = True
+                elif p.piece_type in (chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT):
+                    valuable_count += 1
+
+            # Fork conditions
+            if king_attacked and valuable_count >= 1:
+                motifs.append(
+                    make_motif(
+                        "fork",
+                        "Fork",
+                        EX_FORK,
+                        side=side_name(color),
+                        severity="tactical",
+                        eval_cp=eval_cp,
+                        eval_delta_cp=eval_delta,
+                        extra={"forking_piece": chess.square_name(sq)},
+                    )
+                )
+
+            elif valuable_count >= 2:
+                motifs.append(
+                    make_motif(
+                        "fork",
+                        "Fork",
+                        EX_FORK,
+                        side=side_name(color),
+                        severity="tactical",
+                        eval_cp=eval_cp,
+                        eval_delta_cp=eval_delta,
+                        extra={"forking_piece": chess.square_name(sq)},
+                    )
+                )
+
+    return motifs
 
 
 # -------------------------
@@ -2834,7 +3119,6 @@ MOTIF_FUNCTIONS = [
     
 
     # --- CORE TACTICAL MOTIFS ---
-    absolute_and_relative_pins,
     hanging_piece,
     defended_hanging_piece,               # NEW
     fork,
@@ -2873,6 +3157,9 @@ MOTIF_FUNCTIONS = [
     center_counterstrike,
     interference,
     fair_trade_sequence_start,
+    absolute_pin,
+    relative_pin,
+    fork_general,
 
 ]
 
