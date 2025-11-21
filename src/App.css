@@ -138,3 +138,18 @@
 .eval-bar-container {
   border: 1px solid #090000;
 }
+.gemini-card {
+  margin-top: 14px;
+  padding: 12px;
+  background: #1e1e1e;
+  border-radius: 8px;
+}
+
+.gemini-output {
+  background: #111;
+  padding: 12px;
+  border-radius: 6px;
+  color: #ddd;
+  font-size: 14px;
+  line-height: 1.4;
+}

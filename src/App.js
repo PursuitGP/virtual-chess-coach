@@ -1,3 +1,4 @@
+import WelcomePage from "./WelcomePage";
 import React, { useMemo, useState } from "react";
 import Chessground from "react-chessground";
 import "chessground/assets/chessground.base.css";
@@ -71,6 +72,7 @@ function sanToPairs(sanList) {
 }
 
 export default function App() {
+  const [showWelcome, setShowWelcome] = useState(true);
   const [game, setGame] = useState(() => new Chess());
   const [fen, setFen] = useState(() => game.fen());
   const [orientation, setOrientation] = useState("white");

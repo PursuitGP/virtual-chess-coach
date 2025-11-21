@@ -11,7 +11,14 @@ from stockfish import Stockfish
 from multiprocessing import Pool, cpu_count
 from concurrent.futures import ThreadPoolExecutor
 from motifs import detect_motifs
+import google.generativeai as genai
 
+
+# -------------------------
+# GEMINI CONFIG
+# -------------------------
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+GEM_MODEL = genai.GenerativeModel("gemini-2.0-flash")
 # ---------- basic logging ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -26,12 +33,12 @@ elif os.path.exists("/opt/homebrew/bin/stockfish"):
     # MAC (M1/M2/M4)
     STOCKFISH_PATH = "/opt/homebrew/bin/stockfish"
 elif os.path.exists("/usr/bin/stockfish"):
-    # LINUX
     STOCKFISH_PATH = "/usr/bin/stockfish"
 else:
     raise FileNotFoundError("Could not find Stockfish binary for your system.")
 
 executor = ThreadPoolExecutor(max_workers=2)
+
 
 def get_fresh_engine():
     """Create a fresh Stockfish instance for each worker/thread."""
@@ -40,6 +47,7 @@ def get_fresh_engine():
     except Exception as e:
         logging.exception("Stockfish engine creation failed")
         raise
+
 
 def evaluate_fen(fen):
     """
@@ -103,6 +111,7 @@ def evaluate_fen(fen):
             "eval": eval_str,
             "best_move": best_move,
         }
+
 
     except Exception as e:
         logging.exception("eval failed")
@@ -263,6 +272,36 @@ def compute_theory_deviation(fen: str, last_move_uci: str):
 # ----------------------
 # Main Flask endpoints
 # ----------------------
+
+# -------------------------
+# GEMINI ENDPOINT
+# -------------------------
+@app.route("/api/gemini_summary", methods=["POST"])
+def gemini_summary():
+    data = request.get_json()
+    evaluations = data.get("evaluations", [])
+
+    limited = evaluations[:15]  # first 15 moves
+
+    prompt = "Analyze the following chess positions.\n"
+    prompt += "For each move, explain the strategy, ideas, and mistakes.\n\n"
+
+    for ev in limited:
+        prompt += f"Move {ev['move_number']} — Eval {ev['eval']}\n"
+        prompt += f"FEN: {ev['fen']}\n"
+        prompt += f"Best move: {ev['best_move']}\n\n"
+
+    try:
+        response = GEM_MODEL.generate_content(prompt)
+        return jsonify({"analysis": response.text})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# -------------------------
+# FULL PGN EVALUATION
+# -------------------------
 @app.route("/api/evaluate_pgn", methods=["POST"])
 def evaluate_pgn():
     if "file" not in request.files:
@@ -364,7 +403,6 @@ def evaluate_pgn():
                 last_move_uci=current_uci,
                 prev_move_uci=prev_uci,
             )
-
             r["motifs"] = motifs
         except Exception as e:
             logging.exception("Motif detection error")
@@ -400,6 +438,9 @@ def evaluate_pgn():
 
 
 
+# -------------------------
+# SINGLE POSITION EVAL
+# -------------------------
 @app.route("/api/coach", methods=["POST"])
 def analyze_position():
     data = request.get_json()
@@ -541,6 +582,8 @@ def motifs_endpoint():
 
 
 
+
 if __name__ == "__main__":
     logging.info("Starting Virtual Chess Coach backend on 127.0.0.1:5000")
     app.run(host="127.0.0.1", port=5000, debug=True)
+print("Gemini key loaded?", bool(os.getenv("GEMINI_API_KEY")))
