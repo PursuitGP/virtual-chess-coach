@@ -1,4 +1,6 @@
 # app.py (improved, replace your existing file with this)
+from dotenv import load_dotenv
+load_dotenv()
 import io
 import os
 import logging
@@ -11,6 +13,17 @@ from stockfish import Stockfish
 from multiprocessing import Pool, cpu_count
 from concurrent.futures import ThreadPoolExecutor
 from motifs import detect_motifs
+import google.generativeai as genai
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+for m in genai.list_models():
+    print(m.name, m.supported_generation_methods)
+
+# Load from .env
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+GEMINI_MODEL = genai.GenerativeModel("gemini-2.5-flash")
+
 
 # ---------- basic logging ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -97,12 +110,13 @@ def evaluate_fen(fen):
     
         return {
             "fen": fen,
-            "sf_raw": raw_eval,      # <-- SEND RAW ENGINE DATA
-            "pv": pv,                # <-- PV list for motifs
+            "sf_raw": raw_eval,
+            "pv": pv_list if pv_list else pv,  # <-- safest option
             "score": score,
             "eval": eval_str,
             "best_move": best_move,
         }
+
 
     except Exception as e:
         logging.exception("eval failed")
@@ -538,6 +552,110 @@ def motifs_endpoint():
         logging.exception("motifs endpoint error")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/gemini_explanations", methods=["POST"])
+def gemini_explanations():
+    """
+    Input JSON:
+    {
+        "pgn": "...",
+        "evaluations": [ { fen, eval, motifs, lichess, ... }, ... ]
+    }
+    Output:
+    {
+        "explanations": [ "Move 1 explanation...", "Move 2...", ... ]
+    }
+    """
+    data = request.get_json()
+
+    if not data or "evaluations" not in data:
+        return jsonify({"error": "Missing evaluations"}), 400
+
+    evaluations = data["evaluations"]
+
+    # Build a summarized version to reduce token load
+    condensed = []
+    for ev in evaluations:
+        condensed.append({
+            "move_number": ev.get("move_number"),
+            "fen": ev.get("fen"),
+            "eval": ev.get("eval"),
+            "eval_delta": ev.get("eval_delta"),
+            "motifs": ev.get("motifs"),
+            "lichess": ev.get("lichess"),
+            "pv": ev.get("pv"),
+            "best_move": ev.get("best_move"),
+            "side_to_move": ev.get("side_to_move"),
+        })
+
+    prompt = f"""
+You are a world-class chess coach specializing in explaining human-understandable insights from engine and motif analysis.
+
+You will be given:
+• The full game PGN (context only)
+• A JSON list of move-by-move evaluations
+  - fen
+  - eval (string, e.g. "+0.32", "-M3")
+  - eval_delta (change from previous ply)
+  - motifs (list)
+  - lichess theory object
+  - pv (principal variation)
+  - best_move
+  - side_to_move
+
+Your task:
+For EACH entry in the JSON list, produce ONE explanation string—roughly 4 to 7 sentences.
+
+STRICT RULES:
+1. Output ONLY a JSON array of strings. No extra text. No commentary. No markdown.  
+2. For each move explanation:
+   • Start with the move number: “Move X:”  
+   • Explain the core engine idea and evaluation trend  
+   • Explain WHY the eval went up or down (use eval_delta)  
+   • If motifs exist and matter → mention them briefly (do NOT list all motifs; only those that impact evaluation or strategy)  
+   • If theory section shows severity ≠ "in-book", explain what was unusual or inaccurate about the played move  
+   • If best_move differs from the played move → explain the difference in plans  
+   • Never invent moves or variations beyond the PV or data provided  
+   • Keep tone concise, logical, and strictly instructive  
+3. NEVER produce:
+   • extraneous commentary  
+   • quotes  
+   • markdown  
+   • nested objects  
+   • move lists  
+4. Each explanation must stand alone without referencing previous or future moves.
+
+Goal:
+Produce professional-grade chess explanations that help a club player understand BOTH the tactical motifs and strategic plans behind the move.
+
+Now return ONLY the JSON array of explanations for all moves:
+JSON:
+{condensed}
+"""
+
+
+    try:
+        reply = GEMINI_MODEL.generate_content(prompt)
+        text = reply.text.strip()
+
+        # Safety: extract only JSON array
+        import json, re
+
+        # Try direct parse
+        try:
+            explanations = json.loads(text)
+        except:
+            # fallback: extract array using regex
+            match = re.search(r"\[.*\]", text, re.DOTALL)
+            if not match:
+                raise ValueError("Gemini did not return JSON")
+            explanations = json.loads(match.group(0))
+
+
+        return jsonify({ "explanations": explanations })
+
+    except Exception as e:
+        logging.exception("Gemini generation failed")
+        return jsonify({ "error": str(e) }), 500
 
 
 

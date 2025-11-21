@@ -321,6 +321,10 @@ export default function App() {
   const [coachLoading, setCoachLoading] = React.useState(false);
   const [coachData, setCoachData] = React.useState(null);
   const [coachError, setCoachError] = React.useState(null);
+  // --- Gemini Explanations state ---
+  const [geminiLoading, setGeminiLoading] = useState(false);
+  const [geminiError, setGeminiError] = useState(null);
+  const [geminiMoves, setGeminiMoves] = useState(null);
 
   const chartData = {
     datasets: [
@@ -434,6 +438,11 @@ export default function App() {
       if (data.evaluations) {
         setAllEvaluations(data.evaluations);
 
+        // 🔥 AUTO-GENERATE GEMINI EXPLANATIONS
+        if (data.evaluations?.length) {
+          generateGeminiExplanations(pgnHeaders?.Raw || "", data.evaluations);
+        }
+
         const first = data.evaluations[0];
 
         let numeric = 0;
@@ -459,11 +468,6 @@ export default function App() {
 
             // Use the ACTUAL replayed FEN (correct position)
             let sideToMove = "w";
-            try {
-              sideToMove = replay.fen().split(" ")[1];
-            } catch {
-              sideToMove = "w";
-            }
 
             if (v === 0) {
               // Mate delivered on this move
@@ -496,6 +500,35 @@ export default function App() {
       console.error("Error uploading PGN:", err);
     } finally {
       setIsEvaluating(false);
+    }
+  }
+
+  async function generateGeminiExplanations(fullPGN, evaluations) {
+    setGeminiLoading(true);
+    setGeminiError(null);
+    setGeminiMoves(null);
+
+    try {
+      const body = {
+        pgn: fullPGN || "",
+        evaluations,
+      };
+
+      const res = await fetch("http://127.0.0.1:5000/api/gemini_explanations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      setGeminiMoves(data.explanations);
+    } catch (err) {
+      console.error("Gemini error:", err);
+      setGeminiError(err.message || "Gemini explanation failed.");
+    } finally {
+      setGeminiLoading(false);
     }
   }
 
@@ -597,6 +630,37 @@ export default function App() {
     }
   }
 
+  async function handleExplainGame() {
+    if (!allEvaluations.length) return;
+
+    setGeminiLoading(true);
+    setGeminiError(null);
+    setGeminiMoves(null);
+
+    try {
+      const body = {
+        pgn: pgnHeaders?.Raw || "", // PGNLoader gives full PGN or we leave blank
+        evaluations: allEvaluations,
+      };
+
+      const res = await fetch("http://127.0.0.1:5000/api/gemini_explanations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      setGeminiMoves(data.explanations);
+    } catch (err) {
+      console.error("Gemini error:", err);
+      setGeminiError(err.message || "Gemini explanation failed.");
+    } finally {
+      setGeminiLoading(false);
+    }
+  }
+
   // --- Motif & Lichess Test Panel ---
   const [motifInfo, setMotifInfo] = useState(null);
   const [motifLoading, setMotifLoading] = useState(false);
@@ -682,7 +746,7 @@ export default function App() {
 
   return (
     <div className="container wide">
-      <h1 style={{ marginBottom: 12 }}>♜ Virtual Chess Coach=</h1>
+      <h1 style={{ marginBottom: 12 }}>♜ Virtual Chess Coach</h1>
 
       <div className="badge" style={{ marginBottom: 12 }}>
         <span>Turn:&nbsp;</span>
@@ -870,23 +934,19 @@ export default function App() {
               )}
             </div>
           </div>
-
           <PGNLoader onParsed={onPGNParsed} />
           {isEvaluating && (
             <p style={{ color: "orange" }}>
               🔄 Evaluating entire PGN... please wait.
             </p>
           )}
-
           {!isEvaluating && allEvaluations.length > 0 && (
             <p style={{ color: "green" }}>✅ PGN fully evaluated!</p>
           )}
-
           <div style={{ marginTop: 12 }}>
             <label>Current FEN</label>
             <input readOnly value={fen} />
           </div>
-
           {/* --- MOTIF / API TEST PANEL --- */}
           <div
             className="card"
@@ -957,7 +1017,6 @@ export default function App() {
               </div>
             )}
           </div>
-
           {/* --- COACH SIDEBAR --- */}
           <div className="card coach-card">
             <div className="panel-header">
@@ -977,12 +1036,37 @@ export default function App() {
                       : "idle"
                   }`}
                 />
-              </div>
+              </div>{" "}
+              {/* <-- properly closes header row */}
               <div className="panel-meta small dim">
                 Explanations and ideas for the current position.
               </div>
-            </div>
+            </div>{" "}
+            {/* <-- closes panel-header fully */}
+            {/* --- GEMINI GAME EXPLANATIONS --- */}
+            <div
+              className="card"
+              style={{ marginTop: 12, background: "#111", padding: 12 }}
+            >
+              <h3 style={{ marginBottom: 8 }}>🤖 Full Game Explanation</h3>
 
+              {geminiLoading && (
+                <p style={{ color: "orange" }}>Gemini is thinking...</p>
+              )}
+
+              {geminiError && <p style={{ color: "red" }}>❌ {geminiError}</p>}
+
+              {geminiMoves && (
+                <div style={{ maxHeight: 300, overflowY: "auto" }}>
+                  {geminiMoves.map((text, i) => (
+                    <div key={i} style={{ marginBottom: 12 }}>
+                      <strong style={{ color: "#9cf" }}>Move {i + 1}</strong>
+                      <p style={{ whiteSpace: "pre-wrap" }}>{text}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
             <div
               className="coach-actions"
               style={{
@@ -1009,7 +1093,6 @@ export default function App() {
               </button>
               <span className="small dim">Sends FEN + moves</span>
             </div>
-
             {coachOpen && (
               <>
                 {/* Loading skeleton */}
