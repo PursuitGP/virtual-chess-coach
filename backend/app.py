@@ -588,46 +588,51 @@ def gemini_explanations():
         })
 
     prompt = f"""
-You are a world-class chess coach specializing in explaining human-understandable insights from engine and motif analysis.
+You are a world-class chess coach. 
+You will receive a JSON list of move-by-move evaluations.
 
-You will be given:
-• The full game PGN (context only)
-• A JSON list of move-by-move evaluations
-  - fen
-  - eval (string, e.g. "+0.32", "-M3")
-  - eval_delta (change from previous ply)
-  - motifs (list)
-  - lichess theory object
-  - pv (principal variation)
-  - best_move
-  - side_to_move
+Each entry includes:
+- fullmove_number
+- side_to_move (“white” or “black”)
+- eval from Stockfish Chess Engine (string)
+- eval_delta
+- relevant motifs or concepts (list) found at every position
+- lichess theory summary
+- pv (principal variation)
+- best_move
+- fen
 
-Your task:
-For EACH entry in the JSON list, produce ONE explanation string—roughly 4 to 7 sentences.
+Your job:
+For each entry, produce ONE explanation string (4–6 sentences).
 
-STRICT RULES:
-1. Output ONLY a JSON array of strings. No extra text. No commentary. No markdown.  
-2. For each move explanation:
-   • Start with the move number: “Move X:”  
-   • Explain the core engine idea and evaluation trend  
-   • Explain WHY the eval went up or down (use eval_delta)  
-   • If motifs exist and matter → mention them briefly (do NOT list all motifs; only those that impact evaluation or strategy)  
-   • If theory section shows severity ≠ "in-book", explain what was unusual or inaccurate about the played move  
-   • If best_move differs from the played move → explain the difference in plans  
-   • Never invent moves or variations beyond the PV or data provided  
-   • Keep tone concise, logical, and strictly instructive  
-3. NEVER produce:
-   • extraneous commentary  
-   • quotes  
-   • markdown  
-   • nested objects  
-   • move lists  
-4. Each explanation must stand alone without referencing previous or future moves.
+STRICT OUTPUT RULES:
+• Output ONLY a JSON array of strings — one per ply.  
+• Begin each entry with:
+  “Move X (side that just played move) and then go through each subsequent move. Remember chess is half moves. move 1. is 1 for white and 1 for black. 
+  We explain every position for both sides 
+  using fullmove_number and side_to_move. That is to say every game begins 1 (white), 1(black), 2(wh...).
+• Never mention motif names literally. 
+  Use motifs ONLY to inform the explanation.
+  You CAN mention the motif name literally only if it is a mate (m4,m4, etc.) motif.
+• Never mention eval numbers or eval_delta.  
+  Describe improvement/deterioration in natural chess language.
+• Never include move lists or invented variations. 
+  Only refer to the provided PV if needed.
+• Never repeat generic lines.
+• Tone must be clear, human, instructional — like a real chess coach.
+ALWAYS EXPLAIN THE MOVE FROM THE PERSPECTIVE OF THE PLAYER WHO JUST MOVED AND
+ENSURE THE EXPLANATION IS CONSISTENT WITH THE MOVES LITERALLY PLAYED. (reflected by the pgn, or list of fens).
+• Focus each explanation on:
+  - plan behind the move
+  - positional ideas
+  - tactical consequences
+  - why the move is good, inaccurate, or losing
+  - how the position changed afterward
 
 Goal:
-Produce professional-grade chess explanations that help a club player understand BOTH the tactical motifs and strategic plans behind the move.
+Produce instructive, followable commentary suitable for club-level players.
 
-Now return ONLY the JSON array of explanations for all moves:
+Return ONLY the JSON array of explanations.
 JSON:
 {condensed}
 """

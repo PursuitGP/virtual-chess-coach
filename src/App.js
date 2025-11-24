@@ -81,6 +81,7 @@ export default function App() {
   const [pgnHeaders, setPgnHeaders] = useState(null);
   const [pgnMoves, setPgnMoves] = useState([]); // verbose
   const [plyIndex, setPlyIndex] = useState(0);
+  const [pgnOpen, setPgnOpen] = useState(false);
 
   //Eval
   //Eval
@@ -754,6 +755,7 @@ export default function App() {
       </div>
 
       <div className="grid grid-2">
+        {/* LEFT COLUMN */}
         <div className="card">
           {/* Control Dashboard */}
           <div className="controls">
@@ -836,7 +838,7 @@ export default function App() {
               marginTop: "16px",
             }}
           >
-            {/* Eval label on the left, always readable */}
+            {/* Eval label */}
             <div
               style={{
                 minWidth: 48,
@@ -889,6 +891,7 @@ export default function App() {
             />
           </div>
 
+          {/* STOCKFISH GRAPH */}
           <div
             style={{
               height: 160,
@@ -909,45 +912,8 @@ export default function App() {
               </p>
             )}
           </div>
-        </div>
 
-        <div className="card">
-          <div className="panel-header">
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span role="img" aria-label="folder">
-                📂
-              </span>
-              <strong>PGN Loader</strong>
-            </div>
-            <div className="panel-meta">
-              {pgnHeaders && (
-                <div className="pgn-meta">
-                  <div>
-                    <strong>{pgnHeaders.White || "White"}</strong> vs{" "}
-                    <strong>{pgnHeaders.Black || "Black"}</strong>
-                  </div>
-                  <div>
-                    {pgnHeaders.Event || "Event"} • {pgnHeaders.Site || "Site"}{" "}
-                    • {pgnHeaders.Date || "Date"} • {pgnHeaders.Result || ""}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-          <PGNLoader onParsed={onPGNParsed} />
-          {isEvaluating && (
-            <p style={{ color: "orange" }}>
-              🔄 Evaluating entire PGN... please wait.
-            </p>
-          )}
-          {!isEvaluating && allEvaluations.length > 0 && (
-            <p style={{ color: "green" }}>✅ PGN fully evaluated!</p>
-          )}
-          <div style={{ marginTop: 12 }}>
-            <label>Current FEN</label>
-            <input readOnly value={fen} />
-          </div>
-          {/* --- MOTIF / API TEST PANEL --- */}
+          {/* --- MOTIF / API TEST PANEL (unchanged except location) --- */}
           <div
             className="card"
             style={{ marginTop: 16, background: "#111", padding: 12 }}
@@ -1017,8 +983,74 @@ export default function App() {
               </div>
             )}
           </div>
+        </div>
+
+        {/* RIGHT COLUMN */}
+        <div className="card">
+          {/* --- COLLAPSIBLE PGN LOADER --- */}
+          <div
+            onClick={() => setPgnOpen((o) => !o)}
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "10px 12px",
+              background: "#222",
+              borderRadius: 6,
+              cursor: "pointer",
+              userSelect: "none",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span role="img" aria-label="folder">
+                📂
+              </span>
+              <strong>PGN Loader</strong>
+            </div>
+
+            <span style={{ fontSize: "18px", opacity: 0.8 }}>
+              {pgnOpen ? "▾" : "▸"}
+            </span>
+          </div>
+
+          {pgnOpen && (
+            <div
+              className="card"
+              style={{ background: "#111", padding: 12, marginTop: 12 }}
+            >
+              {pgnHeaders && (
+                <div className="pgn-meta" style={{ marginBottom: 10 }}>
+                  <div>
+                    <strong>{pgnHeaders.White || "White"}</strong> vs{" "}
+                    <strong>{pgnHeaders.Black || "Black"}</strong>
+                  </div>
+                  <div>
+                    {pgnHeaders.Event || "Event"} • {pgnHeaders.Site || "Site"}{" "}
+                    • {pgnHeaders.Date || "Date"} • {pgnHeaders.Result || ""}
+                  </div>
+                </div>
+              )}
+
+              <PGNLoader onParsed={onPGNParsed} />
+
+              {isEvaluating && (
+                <p style={{ color: "orange" }}>
+                  🔄 Evaluating entire PGN... please wait.
+                </p>
+              )}
+              {!isEvaluating && allEvaluations.length > 0 && (
+                <p style={{ color: "green" }}>✅ PGN fully evaluated!</p>
+              )}
+
+              <div style={{ marginTop: 12 }}>
+                <label>Current FEN</label>
+                <input readOnly value={fen} />
+              </div>
+            </div>
+          )}
+
           {/* --- COACH SIDEBAR --- */}
-          <div className="card coach-card">
+          <div className="card coach-card" style={{ marginTop: 16 }}>
             <div className="panel-header">
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span role="img" aria-label="brain">
@@ -1036,14 +1068,13 @@ export default function App() {
                       : "idle"
                   }`}
                 />
-              </div>{" "}
-              {/* <-- properly closes header row */}
+              </div>
               <div className="panel-meta small dim">
                 Explanations and ideas for the current position.
               </div>
-            </div>{" "}
-            {/* <-- closes panel-header fully */}
-            {/* --- GEMINI GAME EXPLANATIONS --- */}
+            </div>
+
+            {/* Gemini Explanations */}
             <div
               className="card"
               style={{ marginTop: 12, background: "#111", padding: 12 }}
@@ -1056,17 +1087,27 @@ export default function App() {
 
               {geminiError && <p style={{ color: "red" }}>❌ {geminiError}</p>}
 
-              {geminiMoves && (
-                <div style={{ maxHeight: 300, overflowY: "auto" }}>
-                  {geminiMoves.map((text, i) => (
-                    <div key={i} style={{ marginBottom: 12 }}>
-                      <strong style={{ color: "#9cf" }}>Move {i + 1}</strong>
-                      <p style={{ whiteSpace: "pre-wrap" }}>{text}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
+              {geminiMoves &&
+                plyIndex > 0 &&
+                plyIndex <= geminiMoves.length && (
+                  <div style={{ marginTop: 4 }}>
+                    <p style={{ whiteSpace: "pre-wrap" }}>
+                      {geminiMoves[plyIndex - 1]}
+                    </p>
+                  </div>
+                )}
+
+              {geminiMoves &&
+                plyIndex === 0 &&
+                !geminiLoading &&
+                !geminiError && (
+                  <p className="small" style={{ color: "#aaa", marginTop: 4 }}>
+                    Step through the moves (← / →) to see explanations.
+                  </p>
+                )}
             </div>
+
+            {/* Coach Actions */}
             <div
               className="coach-actions"
               style={{
@@ -1093,9 +1134,10 @@ export default function App() {
               </button>
               <span className="small dim">Sends FEN + moves</span>
             </div>
+
+            {/* Coach Expanded */}
             {coachOpen && (
               <>
-                {/* Loading skeleton */}
                 {coachLoading && (
                   <div className="coach-skeleton">
                     <div className="sk-line" />
@@ -1104,7 +1146,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Error */}
                 {!coachLoading && coachError && (
                   <div className="coach-error">
                     <strong>Error:</strong> {coachError}
@@ -1115,7 +1156,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Data */}
                 {!coachLoading && !coachError && coachData && (
                   <div className="coach-result">
                     {coachData.opening && (
@@ -1148,7 +1188,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Payload preview (dev only) */}
                 {!coachLoading && !coachData && !coachError && (
                   <details className="coach-payload">
                     <summary className="small">Payload preview</summary>
@@ -1159,7 +1198,8 @@ export default function App() {
             )}
           </div>
 
-          <div className="history" style={{ marginTop: 12 }}>
+          {/* MOVE HISTORY */}
+          <div className="history" style={{ marginTop: 16 }}>
             <label>Move History</label>
             {movePairs.length === 0 ? (
               <p className="small">No moves yet</p>
