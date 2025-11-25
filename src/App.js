@@ -8,6 +8,9 @@ import { Chess } from "chess.js";
 import PGNLoader from "./PGNLoader";
 import { useEffect } from "react";
 import { Line } from "react-chartjs-2";
+import { MOTIF_KEYWORDS } from "./motifs";
+import { MOTIF_GLOSSARY } from "./motifGlossary";
+import { flushSync } from "react-dom";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -32,6 +35,17 @@ ChartJS.register(
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
 const RANKS = ["1", "2", "3", "4", "5", "6", "7", "8"];
 const ALL_SQUARES = FILES.flatMap((f) => RANKS.map((r) => f + r));
+
+// Extract from/to squares from a UCI string (e.g. "e2e4")
+function parseUCIMove(uci) {
+  if (!uci || typeof uci !== "string") return null;
+  if (uci.length < 4) return null;
+  return {
+    from: uci.slice(0, 2),
+    to: uci.slice(2, 4)
+  };
+}
+
 
 function isTyping(node) {
   if (!node) return false;
@@ -83,7 +97,44 @@ export default function App() {
   const [plyIndex, setPlyIndex] = useState(0);
   const [pgnOpen, setPgnOpen] = useState(false);
 
-  //Eval
+
+
+// --- Motif Hyperlink System ---
+
+// Converts text → clickable hyperlinks
+function hyperlinkMotifs(text) {
+  if (!text) return text;
+
+  let replaced = text;
+
+  for (const [keyword, id] of Object.entries(MOTIF_KEYWORDS)) {
+    const regex = new RegExp(`\\b${keyword}\\b`, "gi");
+   replaced = replaced.replace(regex, match => {
+    return `<span class="motif-link"
+        data-motif-id="${id}"
+        data-motif-key="${keyword}">
+        ${match}
+      </span>`;
+  });
+
+  }
+
+  return replaced;
+}
+
+
+// Handle clicks on motif keywords inside Gemini text
+function onGeminiClick(e) {
+  const target = e.target;
+  if (target.classList.contains("motif-link")) {
+    const motifId = target.getAttribute("data-motif");
+    setActiveMotif(motifId);
+  }
+}
+
+
+
+
   //Eval
   const [evaluation, setEvaluation] = useState(0); // numeric for bar height
   const [allEvaluations, setAllEvaluations] = useState([]);
@@ -121,16 +172,21 @@ export default function App() {
   }
 
   function resetBoard() {
-    const fresh = new Chess();
-    syncFrom(fresh);
-    setPlyIndex(0);
-    setLastMove(null);
-    setEvaluation(0); // reset the eval bar
+    flushSync(() => {
+      const fresh = new Chess();
+      syncFrom(fresh);
+      setPlyIndex(0);
+      setLastMove(null);
+      setEvaluation(0);
+    });
   }
 
   function flipBoard() {
-    setOrientation((o) => (o === "white" ? "black" : "white"));
+    flushSync(() => {
+      setOrientation((o) => (o === "white" ? "black" : "white"));
+    });
   }
+
 
   function stepTo(index) {
     const target = Math.max(0, Math.min(index, pgnMoves.length));
@@ -202,20 +258,21 @@ export default function App() {
     return "";
   };
   const points = useMemo(() => {
-    return allEvaluations.map((e, i) => {
-      if (i === 0) return { x: i + 1, y: e.score, color: "#00ff00" }; // start
-      const prev = allEvaluations[i - 1]?.score ?? 0;
-      const delta = e.score - prev;
-      const drop = Math.abs(delta);
+  return allEvaluations.map((e, i) => {
+    const score = Number(e?.score ?? 0) || 0;
+    const prev = Number(allEvaluations[i - 1]?.score ?? 0) || 0;
 
-      let color = "#00ff00"; // green: good move
-      if (drop > 0.5 && drop <= 1.5) color = "#ffd700"; // yellow: inaccuracy
-      else if (drop > 1.5 && drop <= 3.0) color = "#ff8c00"; // orange: mistake
-      else if (drop > 3.0) color = "#ff0000"; // red: blunder
+    const drop = Math.abs(score - prev);
 
-      return { x: i + 1, y: e.score, color };
-    });
-  }, [allEvaluations]);
+    let color = "#00ff00";
+    if (drop > 0.5 && drop <= 1.5) color = "#ffd700";
+    else if (drop > 1.5 && drop <= 3.0) color = "#ff8c00";
+    else if (drop > 3.0) color = "#ff0000";
+
+    return { x: i + 1, y: score, color };
+  });
+}, [allEvaluations]);
+
 
   useEffect(() => {
     const isTyping = (el) => {
@@ -667,6 +724,21 @@ export default function App() {
   const [motifLoading, setMotifLoading] = useState(false);
   const [motifError, setMotifError] = useState(null);
 
+
+    // --- Motif UI: tooltip + modal ---
+  const [tooltip, setTooltip] = useState({
+    visible: false,
+    text: "",
+    x: 0,
+    y: 0,
+  });
+
+  const [activeMotif, setActiveMotif] = useState(null);
+  const [showMotifModal, setShowMotifModal] = useState(false);
+
+
+
+
   // Set this to whatever you want (default 20)
   const MIN_GAMES_THRESHOLD = 20;
 
@@ -1090,12 +1162,87 @@ export default function App() {
               {geminiMoves &&
                 plyIndex > 0 &&
                 plyIndex <= geminiMoves.length && (
-                  <div style={{ marginTop: 4 }}>
-                    <p style={{ whiteSpace: "pre-wrap" }}>
-                      {geminiMoves[plyIndex - 1]}
-                    </p>
-                  </div>
+                  <div
+                    className="gemini-text"
+                    style={{ marginTop: 4 }}
+
+                    onClick={(e) => {
+                      const link = e.target.closest(".motif-link");
+                      if (!link) return;
+                      e.preventDefault();
+
+                      const motifId = (link.dataset.motifId || "").toLowerCase();
+
+                      // Convert motif-id → real glossary key
+                      let normalizedKey = motifId.replace(/^motif-/, "").replace(/-/g, " ");
+
+                      // Look up definition
+                      const glossary = MOTIF_GLOSSARY[normalizedKey] || {};
+
+                      // Engine motifs (optional merge)
+                      let engineSnippet = "";
+                      if (motifInfo?.motifs?.length) {
+                        const hit = motifInfo.motifs.find((m) =>
+                          (m.name || "").toLowerCase().includes(normalizedKey)
+                        );
+                        if (hit) engineSnippet = hit.explanation || "";
+                      }
+
+                      setActiveMotif({
+                        id: motifId,
+                        key: normalizedKey,
+                        title: glossary.title || normalizedKey,
+                        short: glossary.short || "",
+                        long: glossary.long || "",
+                        example: glossary.example || "",
+                        engineSnippet,
+                      });
+
+                      setShowMotifModal(true);
+                    }}
+
+                    onMouseMove={(e) => {
+                      const link = e.target.closest(".motif-link");
+                      if (!link) {
+                        if (tooltip.visible) {
+                          setTooltip((prev) => ({ ...prev, visible: false }));
+                        }
+                        return;
+                      }
+
+                      const key = (link.dataset.motifKey || "").toLowerCase();
+                      const glossary = MOTIF_GLOSSARY[key] || {};
+                      let text = glossary.short || link.textContent || key;
+
+                      // add engine details if available
+                      if (motifInfo?.motifs?.length) {
+                        const hit = motifInfo.motifs.find((m) =>
+                          (m.name || "").toLowerCase().includes(key)
+                        );
+                        if (hit) {
+                          text += ` — Engine: ${hit.explanation}`;
+                        }
+                      }
+
+                      setTooltip({
+                        visible: true,
+                        text,
+                        x: e.clientX,
+                        y: e.clientY,
+                      });
+                    }}
+
+                    onMouseLeave={() => {
+                      setTooltip((prev) => ({ ...prev, visible: false }));
+                    }}
+
+                    dangerouslySetInnerHTML={{
+                      __html: hyperlinkMotifs(geminiMoves?.[plyIndex - 1] || ""),
+                    }}
+                  />
+
                 )}
+
 
               {geminiMoves &&
                 plyIndex === 0 &&
@@ -1217,8 +1364,165 @@ export default function App() {
               </table>
             )}
           </div>
+
+          {/* --- MOTIF GLOSSARY SIDE PANEL --- */}
+             {activeMotif && (
+              <div className="motif-panel">
+                <div className="motif-panel-header">
+                  <strong>{activeMotif.title}</strong>
+                  <button
+                    className="close-btn"
+                    onClick={() => setActiveMotif(null)}
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div className="motif-panel-body">
+                  {/* Description */}
+                  <p style={{ marginBottom: "12px" }}>
+                    {activeMotif.long || activeMotif.short || "No description available."}
+                  </p>
+
+                  {/* MINI-BOARD */}
+                  <div
+                    style={{
+                      width: "220px",
+                      height: "220px",
+                      margin: "12px auto",
+                      borderRadius: "6px",
+                      overflow: "hidden",
+                      border: "1px solid #555",
+                    }}
+                  >
+                    <Chessground
+                      width={220}
+                      height={220}
+                      fen={motifInfo?.fen || fen}   // <-- SHOW MOTIF MOMENT FEN
+                      orientation={orientation}
+                      draggable={false}
+                      movable={{ free: false, color: "none", dests: new Map() }}
+                      highlight={{
+                        lastMove: true,
+                        check: true,
+                        squares: (() => {
+                          const u = parseUCIMove(motifInfo?.last_move_uci);
+                          return u ? [u.from, u.to] : [];
+                        })(),
+                      }}
+                      drawable={{
+                        enabled: true,
+                        visible: true,
+                        autoShapes: (() => {
+                          const u = parseUCIMove(motifInfo?.last_move_uci);
+                          return u
+                            ? [
+                                {
+                                  orig: u.from,
+                                  dest: u.to,
+                                  brush: "green",     // arrow color
+                                },
+                              ]
+                            : [];
+                        })(),
+                      }}
+                    />
+                  </div>
+
+                  {/* Engine snippet if exists */}
+                  {activeMotif.engineSnippet && (
+                    <p style={{ marginTop: 10, fontSize: "0.9em", opacity: 0.8 }}>
+                      <strong>Engine noted:</strong> {activeMotif.engineSnippet}
+                    </p>
+                  )}
+
+                  {/* Example */}
+                  {activeMotif.example && (
+                    <p
+                      style={{
+                        marginTop: 10,
+                        fontSize: "0.9em",
+                        fontStyle: "italic",
+                      }}
+                    >
+                      Example: {activeMotif.example}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
+
+
         </div>
       </div>
+            {/* MOTIF TOOLTIP */}
+      {tooltip.visible && (
+        <div
+          className="motif-tooltip"
+          style={{
+            top: tooltip.y + 12,
+            left: tooltip.x + 12,
+          }}
+        >
+          {tooltip.text}
+        </div>
+      )}
+
+      {/* MOTIF MODAL */}
+      {showMotifModal && activeMotif && (
+        <div
+          className="motif-modal-backdrop"
+          onClick={() => setShowMotifModal(false)}
+        >
+          <div
+            className="motif-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>
+              ♟ {activeMotif.title || activeMotif.key}
+            </h2>
+
+            {activeMotif.long && (
+              <p style={{ marginTop: 8 }}>{activeMotif.long}</p>
+            )}
+
+            {activeMotif.engineSnippet && (
+              <p
+                style={{
+                  marginTop: 8,
+                  fontSize: "0.9em",
+                  opacity: 0.8,
+                }}
+              >
+                <strong>Engine found here:</strong>{" "}
+                {activeMotif.engineSnippet}
+              </p>
+            )}
+
+            {activeMotif.example && (
+              <p
+                style={{
+                  marginTop: 8,
+                  fontSize: "0.9em",
+                  fontStyle: "italic",
+                }}
+              >
+                Example: {activeMotif.example}
+              </p>
+            )}
+
+            <button
+              className="btn"
+              style={{ marginTop: 16 }}
+              onClick={() => setShowMotifModal(false)}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
