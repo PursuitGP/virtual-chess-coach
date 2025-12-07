@@ -2,3 +2,6 @@ flask
 flask-cors
 python-chess
 stockfish
+python-dotenv
+requests
+google-generativeai
