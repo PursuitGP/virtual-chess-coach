@@ -610,7 +610,8 @@ STRICT OUTPUT RULES:
 • Begin each entry with:
   “Move X (side that just played move) and then go through each subsequent move. Remember chess is half moves. move 1. is 1 for white and 1 for black. 
   We explain every position for both sides 
-  using fullmove_number and side_to_move. That is to say every game begins 1 (white), 1(black), 2(wh...).
+  using fullmove_number and side_to_move. That is to say EVERY game begins 1 (white), 1(black), 2(wh...). Move 1 will NEVER start from blacks perspective "1(black)".
+  It will always begin 1 (white).
 • Never mention motif names literally. 
   Use motifs ONLY to inform the explanation.
   You CAN mention the motif name literally only if it is a mate (m4,m4, etc.) motif.
