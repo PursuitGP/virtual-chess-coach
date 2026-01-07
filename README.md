@@ -1,5 +1,9 @@
-﻿# ♜ Virtual Chess Coach  
-*A modern React app built with **react-chessground** + **chess.js** — minimal, extensible, and AI-ready.*
+﻿# ♜ Virtual Chess Coach
+
+_A modern React app built with **react-chessground** + **chess.js** — minimal, extensible, and AI-ready._
+**Author:** Daniel G. Pineda, Tristan Berry, Cristian Porras  
+**Context:** University Capstone Project  
+**Purpose:** Portfolio / educational project demonstrating full-stack development, chess analysis, and AI integration.
 
 ---
 
@@ -17,47 +21,51 @@ Runs on **Create React App (CRA)** — no TypeScript required.
 ## 🧩 Core Features
 
 ### ♟️ Board & Playback
+
 - Fully interactive **drag-and-drop** board using `react-chessground`
 - Legal move validation powered by `chess.js`
 - Flip board orientation (`F` key or button)
 - Reset game to start (`R` key or button)
 - Move forward/backward step-by-step
 - **Skip to Start/End** buttons and keyboard shortcuts:
-  - ← / → : Step through moves  
-  - Home / End : Jump to first or last move  
-  - **R** : Reset board  
+  - ← / → : Step through moves
+  - Home / End : Jump to first or last move
+  - **R** : Reset board
   - **F** : Flip board
 
 ---
 
 ### 📂 PGN Handling
+
 - Upload `.pgn` files and auto-parse via `chess.js`
 - **PGN normalization** (headers cleaned, comments removed, result preserved)
 - Collapsible **Normalized PGN preview** with:
   - 📋 **Copy to Clipboard**
-  - ▸ Show / ▾ Hide toggle  
+  - ▸ Show / ▾ Hide toggle
 - Error handling for invalid or malformed PGNs
 - Displays metadata (Event, Site, Date, Players, Result)
 
 ---
 
-### 🧠 Coach Sidebar *(new)*
+### 🧠 Coach Sidebar _(new)_
+
 - Dedicated **AI Coach panel** ready for backend integration
 - Sends current **FEN**, **move history**, and **metadata** as payload
 - Mocked response for development with:
-  - Opening name  
-  - Engine evaluation  
+  - Opening name
+  - Engine evaluation
   - Positional ideas / suggestions
 - Animated **status indicator** (Idle / Busy / Success / Error)
 - Collapsible “Payload Preview” (for debugging)
 - Ready for future backend with:
-  - ChatGPT commentary  
-  - Stockfish evaluations  
+  - ChatGPT commentary
+  - Stockfish evaluations
   - Lichess opening lookup
 
 ---
 
 ### 💡 UI / UX Enhancements
+
 - Refined **dark minimalist** layout
 - Smooth **last-move glow with fade-out**
 - Clean button set with hover/active states
@@ -79,14 +87,13 @@ src/
 
 ---
 
-
 ## 🧭 Roadmap
 
-- [ ] Connect Node/Express backend  
-- [ ] Integrate Stockfish WASM for engine evaluations  
-- [ ] Implement ChatGPT “Explain Move” mode  
-- [ ] Save/load user games  
-- [ ] Visualize evaluations graphically  
+- [ ] Connect Node/Express backend
+- [ ] Integrate Stockfish WASM for engine evaluations
+- [ ] Implement ChatGPT “Explain Move” mode
+- [ ] Save/load user games
+- [ ] Visualize evaluations graphically
 - [ ] Add theme switcher (dark/light/high contrast)
 
 ---
@@ -98,6 +105,3 @@ src/
 - **chess.js**
 
 ---
-
-
-
