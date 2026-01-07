@@ -16,6 +16,19 @@ npm start
 
 Runs on **Create React App (CRA)** — no TypeScript required.
 
+### Backend
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+```bash
+python3 app.py
+```
+
 ---
 
 ## 🧩 Core Features
@@ -105,3 +118,32 @@ src/
 - **chess.js**
 
 ---
+
+## 🖥️ Backend & AI Integration
+
+The project includes a Python backend (Flask) that powers AI-driven analysis features.
+
+### Backend Capabilities
+
+- REST API for game analysis requests
+- Stockfish engine integration for position evaluation
+- AI-generated explanations using Google Gemini
+- PGN ingestion and FEN-based analysis pipeline
+- Response caching for performance optimization
+
+### Technologies
+
+- **Python**
+- **Flask**
+- **Stockfish**
+- **Google Gemini API**
+- **python-dotenv** for environment variable management
+
+---
+
+```md
+## 📄 License
+
+This project is licensed under the MIT License.  
+© 2025 Daniel G. Pineda
+```
