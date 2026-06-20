@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "name": "Virtual Chess Coach authored studies",
+  "entries": [
+    {
+      "id": "italian-two-knights-knight-attack",
+      "match": {
+        "opening_name": "Italian Game: Two Knights Defense, Knight Attack"
+      },
+      "title": "The Knight Attack against the Two Knights Defense",
+      "summary": "White's knight jump to g5 combines with the bishop on c4 to increase pressure on f7. Black usually needs an immediate and concrete response in the center, but the engine evidence for the submitted position determines which continuation is sound.",
+      "ideas": [
+        "Connect the bishop on c4 and knight on g5 to the pressure on f7.",
+        "Check whether Black's central counterplay interrupts the attack or opens new tactical lines."
+      ],
+      "common_mistakes": [
+        "Treating every attack on f7 as automatically winning without checking Black's forcing replies."
+      ],
+      "source": {
+        "type": "project-authored",
+        "author": "Daniel G. Pineda"
+      }
+    },
+    {
+      "id": "italian-game-family",
+      "match": {
+        "opening_name_prefix": "Italian Game"
+      },
+      "title": "Italian Game family",
+      "summary": "This open-game family emphasizes rapid development, central influence, king safety, and pressure on f7. The concrete plan depends on whether the center opens immediately or remains stable.",
+      "ideas": [
+        "Develop with tempo when possible and watch the tactical condition of f7.",
+        "Use the center to judge whether an early kingside attack is justified."
+      ],
+      "common_mistakes": [],
+      "source": {
+        "type": "project-authored",
+        "author": "Daniel G. Pineda"
+      }
+    },
+    {
+      "id": "ruy-lopez-family",
+      "match": {
+        "opening_name_prefix": "Ruy Lopez"
+      },
+      "title": "Ruy Lopez family",
+      "summary": "White develops with pressure on the knight supporting e5 while both sides balance central tension, development, and long-term piece activity.",
+      "ideas": [
+        "Do not assume the pin on the c6 knight immediately wins the e5 pawn.",
+        "Coordinate central preparation with castling and piece development."
+      ],
+      "common_mistakes": [],
+      "source": {
+        "type": "project-authored",
+        "author": "Daniel G. Pineda"
+      }
+    },
+    {
+      "id": "sicilian-defense-family",
+      "match": {
+        "opening_name_prefix": "Sicilian Defense"
+      },
+      "title": "Sicilian Defense family",
+      "summary": "Black creates an asymmetrical fight against 1.e4 by controlling d4 from the c-file. Unequal pawn structures and active counterplay often produce plans on opposite wings.",
+      "ideas": [
+        "Relate development to the central d4 break and the open or half-open c-file.",
+        "Expect tactical play because the pawn structure is deliberately unbalanced."
+      ],
+      "common_mistakes": [],
+      "source": {
+        "type": "project-authored",
+        "author": "Daniel G. Pineda"
+      }
+    },
+    {
+      "id": "french-defense-family",
+      "match": {
+        "opening_name_prefix": "French Defense"
+      },
+      "title": "French Defense family",
+      "summary": "Black supports a later challenge to White's center. Pawn breaks and the activity of Black's light-squared bishop are recurring strategic questions.",
+      "ideas": [
+        "Judge the position through the timing of central pawn breaks.",
+        "Track whether the light-squared bishop is active or restricted."
+      ],
+      "common_mistakes": [],
+      "source": {
+        "type": "project-authored",
+        "author": "Daniel G. Pineda"
+      }
+    },
+    {
+      "id": "caro-kann-defense-family",
+      "match": {
+        "opening_name_prefix": "Caro-Kann Defense"
+      },
+      "title": "Caro-Kann Defense family",
+      "summary": "Black prepares a central challenge while usually preserving a route for the light-squared bishop. Development and the timing of pawn breaks remain central.",
+      "ideas": [
+        "Complete development without surrendering the structural solidity of the position.",
+        "Use the c-pawn preparation to challenge White's center."
+      ],
+      "common_mistakes": [],
+      "source": {
+        "type": "project-authored",
+        "author": "Daniel G. Pineda"
+      }
+    },
+    {
+      "id": "queens-gambit-family",
+      "match": {
+        "opening_name_prefix": "Queen's Gambit"
+      },
+      "title": "Queen's Gambit family",
+      "summary": "White challenges Black's d5 pawn with c4. The resulting structures emphasize central tension, development, and the long-term consequences of accepting or declining the gambit.",
+      "ideas": [
+        "Treat the c-pawn offer as a central challenge rather than an automatic material sacrifice.",
+        "Base plans on the resulting pawn structure and central breaks."
+      ],
+      "common_mistakes": [],
+      "source": {
+        "type": "project-authored",
+        "author": "Daniel G. Pineda"
+      }
+    },
+    {
+      "id": "kings-indian-defense-family",
+      "match": {
+        "opening_name_prefix": "King's Indian Defense"
+      },
+      "title": "King's Indian Defense family",
+      "summary": "Black allows White to build a broad center and then seeks dynamic counterplay against it. Pawn breaks and the race between queenside space and kingside activity often define the position.",
+      "ideas": [
+        "Identify which pawn break challenges the center.",
+        "Compare White's queenside space with Black's kingside activity."
+      ],
+      "common_mistakes": [],
+      "source": {
+        "type": "project-authored",
+        "author": "Daniel G. Pineda"
+      }
+    },
+    {
+      "id": "english-opening-family",
+      "match": {
+        "opening_name_prefix": "English Opening"
+      },
+      "title": "English Opening family",
+      "summary": "The move c4 controls d5 and supports flexible development that can transpose into several 1.d4 structures. Piece placement and recognition of the resulting pawn structure matter more than memorizing a label.",
+      "ideas": [
+        "Use control of d5 to guide piece placement.",
+        "Recognize transpositions by structure rather than by move order alone."
+      ],
+      "common_mistakes": [],
+      "source": {
+        "type": "project-authored",
+        "author": "Daniel G. Pineda"
+      }
+    },
+    {
+      "id": "kings-pawn-game-family",
+      "match": {
+        "opening_name_prefix": "King's Pawn Game"
+      },
+      "title": "King's Pawn Game family",
+      "summary": "The move e4 creates central influence and opens lines for the queen and king's bishop. Development speed and king safety are usually the immediate priorities.",
+      "ideas": [
+        "Use the opened bishop and queen lines to develop quickly.",
+        "Challenge the opponent's center without neglecting king safety."
+      ],
+      "common_mistakes": [],
+      "source": {
+        "type": "project-authored",
+        "author": "Daniel G. Pineda"
+      }
+    },
+    {
+      "id": "queens-pawn-game-family",
+      "match": {
+        "opening_name_prefix": "Queen's Pawn Game"
+      },
+      "title": "Queen's Pawn Game family",
+      "summary": "The move d4 establishes central space and opens the c1 bishop. Plans often develop gradually and depend heavily on the resulting pawn structure.",
+      "ideas": [
+        "Coordinate development with the central pawn structure.",
+        "Delay concrete conclusions until the c- and e-pawns clarify the center."
+      ],
+      "common_mistakes": [],
+      "source": {
+        "type": "project-authored",
+        "author": "Daniel G. Pineda"
+      }
+    }
+  ]
+}

@@ -1,12 +1,12 @@
 # Virtual Chess Coach
 
-> An evidence-grounded AI workflow that turns a chess PGN into position-specific coaching using Stockfish, Lichess Opening Explorer, custom chess motifs, and Gemini.
+> An evidence-grounded AI workflow that turns a chess PGN into position-specific coaching using Stockfish, Lichess Opening Explorer, authored studies, custom chess motifs, and Gemini.
 
 [![CI](https://github.com/PursuitGP/virtual-chess-coach/actions/workflows/ci.yml/badge.svg)](https://github.com/PursuitGP/virtual-chess-coach/actions/workflows/ci.yml)
 
 Virtual Chess Coach began as a senior-year computer science capstone and is now an actively maintained personal portfolio project. The application reviews the opening phase of an uploaded game, assembles structured evidence for every analyzed position, and asks an LLM to synthesize that evidence into understandable coaching.
 
-The project is deliberately not built around an unaided chatbot. General-purpose language models are unreliable chess calculators. Stockfish supplies calculation, Lichess supplies empirical context, and a custom motif engine supplies domain-specific concepts. Gemini's role is to translate those inputs into useful instruction.
+The project is deliberately not built around an unaided chatbot. General-purpose language models are unreliable chess calculators. Stockfish supplies calculation, Lichess supplies empirical context, authored studies supply optional human plans, and a custom motif engine supplies domain-specific concepts. Gemini's role is to translate those inputs into useful instruction.
 
 ![Virtual Chess Coach interface](docs/virtual-chess-coach.png)
 
@@ -15,6 +15,7 @@ PGN
  └─> legal moves and FEN positions
       ├─> Stockfish evaluation, change, best move, and principal variation
       ├─> Lichess master and rating-filtered player statistics
+      ├─> versioned project-authored study context
       └─> custom tactical and positional motif detection
              └─> structured evidence package
                     └─> Gemini coaching for White, Black, or both
@@ -49,14 +50,14 @@ For each analyzed ply, the backend records:
 - Up to five likely continuations from each database
 - Engine-backed practical continuation candidates that join Stockfish lines to human frequency and results
 - Conservative signals such as `master-aligned-and-sound`, `common-rating-pool-mistake`, and `sound-novelty-candidate`
-- Curated opening names/ECO codes plus short project-authored context for common opening families
+- Curated opening names/ECO codes plus optional versioned study context matched by position, move, or opening family
 - Confidence-gated positional and tactical motifs
 
 Theory classification is calculated against the position before the move was played. “Novelty” is always labeled as a candidate: absence from the selected sample does not prove historical novelty. Lichess statistics are treated as descriptions of human behavior, never as objective evaluations.
 
 Duplicate Lichess position queries are cached. The master and aggregate-player databases use two bounded request streams while each database remains chronological, and both run concurrently with one bounded Stockfish process. A per-database circuit breaker stops an outage or exhausted sample from turning into dozens of repeated calls. Stockfish retains the game history needed for repetition-aware analysis.
 
-The default opening window is 20 plies—ten White-and-Black move pairs—and therefore requires 21 engine searches including the initial position. Stockfish stops when it reaches either target depth 24 or the 1.25-second per-position ceiling. A 16-second total engine budget automatically lowers the per-position ceiling for longer opening windows. The API records the actual depth, selective depth, nodes, and search time instead of implying that the target depth was always reached. MultiPV defaults to one because official Stockfish guidance recommends it for the strongest best-line search; alternative human continuations come from Lichess.
+The default opening window is 20 plies—ten White-and-Black move pairs—and therefore requires 21 primary engine searches including the initial position. Stockfish stops when it reaches either target depth 24 or the 1.25-second per-position ceiling. A 16-second primary-search budget automatically lowers the per-position ceiling for longer opening windows. Primary analysis uses MultiPV 1 for a strong best line. Up to four tactical or evaluation-critical decisions then receive a short MultiPV 4 comparison so the coach can distinguish a normal best move, a clearly superior move, and an engine-supported only move.
 
 The production image builds a pinned Stockfish 18 binary from the official source tag. Runtime defaults use one engine thread and 64 MB of hash so the service remains bounded on a small portfolio deployment.
 
@@ -78,7 +79,7 @@ The Fried Liver line `1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 d5 5. exd5 Nxd5 6. N
 - Gemini must return one validated object for every analyzed ply
 - Explanations target four to six position-specific sentences and receive the
   previous position, the current evidence, and the opponent's next played move
-- Every explanation identifies the Stockfish, Lichess, or motif evidence it used
+- Every explanation identifies the Stockfish, Lichess, study, or motif evidence it used
 - Misaligned moves, missing plies, malformed JSON, and invented evidence references are rejected
 - Failed AI requests preserve the completed analysis and expose a retry action
 - AI generation is paused unless Stockfish, Lichess, and motif evidence are all available
@@ -98,9 +99,11 @@ flowchart LR
     P --> F[Move and FEN sequence]
     F --> S[Stockfish]
     F --> L[Lichess Opening Explorer]
+    F --> D[Authored study database]
     F --> M[Custom motif engine]
     S --> E[Structured evidence package]
     L --> E
+    D --> E
     M --> E
     E --> UI[Evidence review UI]
     E --> G[Gemini synthesis]
@@ -125,7 +128,7 @@ Browser ──> Gunicorn / Flask ──> Stockfish process
 | API | Python 3.12+, Flask, Gunicorn |
 | Engine | Stockfish 18 in production |
 | Chess data | Lichess Opening Explorer |
-| Domain logic | python-chess and a custom motif engine |
+| Domain logic | python-chess, authored JSON studies, and a custom motif engine |
 | AI synthesis | Google GenAI SDK with Gemini 3.1 Flash Lite by default |
 | Deployment | Docker and Railway configuration |
 | Verification | Python `unittest`, Jest, production build, GitHub Actions |
@@ -211,11 +214,39 @@ docker run --rm -p 8080:8080 \
 
 Open `http://localhost:8080`.
 
+## Authored study database
+
+`backend/data/studies.json` is the low-latency home for human opening and
+position knowledge. It is validated at startup and can match an entry by:
+
+- Position before or after a move, stored as normalized EPD
+- The played move in UCI notation
+- An exact Lichess opening name
+- An opening-family prefix
+
+Position-and-move entries outrank broad opening-family entries. Study notes are
+optional context: they never override Stockfish, the submitted board, or motif
+evidence. Validate edits with:
+
+```bash
+python scripts/validate_studies.py
+```
+
+The JSON format is deliberately import-friendly. A later sync command can
+convert comments and variations from a project-owned Lichess Study into these
+entries without adding runtime scraping or network latency to game review.
+
 ## API
 
 ### `GET /api/health`
 
 Reports Stockfish and Gemini availability plus public analysis limits. It does not contact Gemini.
+
+### `GET /api/ready`
+
+Returns HTTP 200 only when Stockfish, Gemini configuration, Lichess
+configuration, and the local study database are ready. Railway uses this
+endpoint for deployment health checks.
 
 ### `POST /api/analyze`
 
@@ -252,7 +283,9 @@ Public defaults are intentionally conservative:
 - Stockfish 18 target depth: 24
 - Per-position engine ceiling: 1.25 seconds
 - Total Stockfish budget per review: 16 seconds
-- Stockfish MultiPV: 1
+- Primary Stockfish MultiPV: 1
+- Selective critical-position comparison: MultiPV 4, at most five positions,
+  with a 0.4-second ceiling per comparison
 - Stockfish resources: 1 thread and 64 MB hash
 - One Gunicorn worker with two request threads
 - Analysis limit: 20 requests per IP per hour
@@ -268,6 +301,7 @@ These controls are appropriate for a single-instance portfolio demonstration, no
 
 ```bash
 python -m unittest discover -s backend/tests -v
+python scripts/validate_studies.py
 npm test -- --watchAll=false
 npm run build
 ```
@@ -311,7 +345,7 @@ Verify configured external credentials with minimal requests:
 python scripts/check_providers.py
 ```
 
-The tests cover PGN parsing, Unicode and headerless games, upload limits, Stockfish search metadata and principal-variation normalization, rating-filtered Lichess request shapes and outcomes, provider failure behavior, theory alignment, confidence-gated motifs, the Fried Liver regression line, AI schema validation, unsupported evidence rejection, caching, incomplete-evidence rejection, rate limits, frontend evaluation helpers, and production compilation.
+The tests cover PGN parsing, Unicode and headerless games, upload limits, Stockfish search metadata, selective MultiPV move classification, study-database validation and matching, rating-filtered Lichess request shapes and outcomes, provider failure behavior, theory alignment, confidence-gated motifs, the Fried Liver regression line, AI schema validation, unsupported evidence rejection, caching, incomplete-evidence rejection, rate limits, frontend evaluation helpers, and production compilation.
 
 ## Deployment
 
@@ -321,7 +355,13 @@ The repository includes a multi-stage `Dockerfile` and `railway.toml`.
 2. Let Railway build the included Dockerfile.
 3. Add `GEMINI_API_KEY` and `LICHESS_TOKEN` as secrets.
 4. Keep the bounded Stockfish defaults unless Railway benchmarks justify changing them.
-5. Confirm `/api/health` before sharing the URL.
+5. Confirm `/api/ready` before sharing the URL.
+6. Run one deployed end-to-end review:
+
+```bash
+python scripts/check_deployment.py https://YOUR-DOMAIN \
+  --pgn pgns/scholars_mate.pgn
+```
 
 The service is deployment-ready at the repository level, but this README does not claim a live public deployment until one has been created and monitored.
 
@@ -330,7 +370,7 @@ The service is deployment-ready at the repository level, but this README does no
 - Analysis is intentionally opening-focused and defaults to the first 20 plies.
 - Published motifs are confidence-gated handcrafted heuristics. They can still miss concepts, while experimental detectors remain withheld pending fixture-based validation.
 - Lichess statistics may be sparse or unavailable for unusual positions.
-- Opening descriptions are short project-authored summaries for common families; Lichess supplies the opening name and ECO code but not a stable description field. A future low-latency extension could sync annotations from a project-owned Lichess study at build time rather than scraping arbitrary web pages at runtime.
+- The authored study database starts small and must be expanded or imported from project-owned Lichess Studies over time.
 - Stockfish lines are converted to SAN for display, while UCI remains in the evidence package for exact machine alignment.
 - Gemini coaching can still be incorrect despite grounding and validation. It is educational assistance, not authoritative analysis.
 - Rate limiting and coaching cache are process-local; horizontal scaling would require shared infrastructure.

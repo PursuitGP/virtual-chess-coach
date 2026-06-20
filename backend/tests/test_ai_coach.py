@@ -55,9 +55,6 @@ def sample_analysis():
                 },
                 "lichess": {
                     "opening": {"eco": "C20", "name": "King's Pawn Game"},
-                    "opening_context": {
-                        "description": "A central opening family.",
-                    },
                     "theory_status": "common-master-move",
                     "practical_signal": {
                         "classification": "master-aligned-and-sound"
@@ -73,6 +70,12 @@ def sample_analysis():
                         "played_move": None,
                         "continuations": [],
                     },
+                },
+                "study": {
+                    "id": "kings-pawn-game-family",
+                    "title": "King's Pawn Game family",
+                    "summary": "A central opening family.",
+                    "ideas": ["Develop quickly."],
                 },
                 "motifs": [{"id": "take_center", "name": "Take the Center"}],
             }
@@ -134,7 +137,7 @@ class AICoachValidationTests(unittest.TestCase):
     def test_accepts_practical_lichess_evidence_references(self):
         payload = valid_payload()
         payload["explanations"][0]["evidence_refs"] = [
-            "lichess.opening_context",
+            "study.context",
             "lichess.practical_signal",
             "lichess.practical_candidates",
             "stockfish.top_lines",
@@ -150,6 +153,7 @@ class AICoachValidationTests(unittest.TestCase):
         self.assertIn('"decision_context"', prompt)
         self.assertIn('"required_coaching_points"', prompt)
         self.assertIn("Never say \"only move\"", prompt)
+        self.assertIn('"study"', prompt)
         self.assertIn("4-6 complete sentences", prompt)
         self.assertNotIn('"lichess.fake.statistic"', prompt)
 
@@ -246,6 +250,28 @@ class AICoachValidationTests(unittest.TestCase):
         self.assertTrue(any("Ke6" in point for point in points))
         self.assertTrue(any("0 immediately safe" in point for point in points))
         self.assertTrue(any("Bxd5+" in point for point in points))
+
+    def test_required_points_attribute_only_move_to_engine_choice(self):
+        position = {
+            "played_move": {"san": "Kg8", "uci": "f7g8"},
+            "decision_context": {
+                "only_move": True,
+                "played_matches_engine_first": False,
+                "engine_first_choice": {"san": "Ke6"},
+                "move_choice": {
+                    "reason": "uniquely_prevents_forced_mate",
+                    "alternatives": [
+                        {"rank": 1, "move_san": "Ke6"},
+                        {"rank": 2, "move_san": "Kg8"},
+                    ],
+                },
+            },
+            "stockfish": {"top_lines": []},
+            "motifs": [],
+        }
+        points = _required_coaching_points(position)
+        self.assertTrue(any("engine defense Ke6" in point for point in points))
+        self.assertFalse(any("played move Kg8 uniquely" in point for point in points))
 
     def test_grounding_adds_best_defense_and_material_context(self):
         position = {

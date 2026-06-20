@@ -20,10 +20,18 @@ import requests
 
 try:
     from .motifs import MOTIF_CONFIDENCE, detect_motifs, publish_motifs
-    from .opening_context import context_for_opening
+    from .study_database import (
+        StudyDatabaseError,
+        context_for_position,
+        study_database_status,
+    )
 except ImportError:
     from motifs import MOTIF_CONFIDENCE, detect_motifs, publish_motifs
-    from opening_context import context_for_opening
+    from study_database import (
+        StudyDatabaseError,
+        context_for_position,
+        study_database_status,
+    )
 
 
 LICHESS_EXPLORER_URL = os.getenv(
@@ -327,6 +335,123 @@ def _move_quality(
     return "sound"
 
 
+def _mover_engine_utility(
+    evaluation: dict[str, Any] | None,
+    mover: str,
+) -> int | None:
+    if not isinstance(evaluation, dict):
+        return None
+    if evaluation.get("type") == "mate":
+        winner = evaluation.get("winner")
+        mate_distance = abs(int(evaluation.get("value") or 0))
+        if winner == mover:
+            return 100_000 - mate_distance
+        if winner in {"white", "black"}:
+            return -100_000 + mate_distance
+        return None
+    value = evaluation.get("value")
+    if not isinstance(value, int):
+        return None
+    return value if mover == "white" else -value
+
+
+def _move_choice_evidence(
+    stockfish_before: dict[str, Any],
+    mover: str,
+) -> dict[str, Any]:
+    lines = stockfish_before.get("top_lines") or []
+    alternatives = []
+    for line in lines[:5]:
+        moves_san = line.get("moves_san") or []
+        moves_uci = line.get("moves_uci") or []
+        alternatives.append(
+            {
+                "rank": line.get("rank"),
+                "move_san": moves_san[0] if moves_san else None,
+                "move_uci": moves_uci[0] if moves_uci else None,
+                "evaluation": line.get("evaluation"),
+            }
+        )
+
+    if len(lines) < 2:
+        return {
+            "classification": "alternatives_not_compared",
+            "only_move": None,
+            "reason": None,
+            "best_vs_second_gap_cp": None,
+            "alternatives": alternatives,
+        }
+
+    best_evaluation = lines[0].get("evaluation")
+    second_evaluation = lines[1].get("evaluation")
+    best_utility = _mover_engine_utility(best_evaluation, mover)
+    second_utility = _mover_engine_utility(second_evaluation, mover)
+    if best_utility is None or second_utility is None:
+        return {
+            "classification": "alternatives_inconclusive",
+            "only_move": None,
+            "reason": None,
+            "best_vs_second_gap_cp": None,
+            "alternatives": alternatives,
+        }
+
+    second_is_forced_mate_loss = (
+        second_evaluation.get("type") == "mate"
+        and second_evaluation.get("winner") != mover
+    )
+    best_is_forced_mate_loss = (
+        best_evaluation.get("type") == "mate"
+        and best_evaluation.get("winner") != mover
+    )
+    best_forces_mate = (
+        best_evaluation.get("type") == "mate"
+        and best_evaluation.get("winner") == mover
+    )
+    second_forces_mate = (
+        second_evaluation.get("type") == "mate"
+        and second_evaluation.get("winner") == mover
+    )
+    cp_gap = (
+        best_utility - second_utility
+        if abs(best_utility) < 90_000 and abs(second_utility) < 90_000
+        else None
+    )
+
+    if second_is_forced_mate_loss and not best_is_forced_mate_loss:
+        classification = "only_move"
+        only_move = True
+        reason = "uniquely_prevents_forced_mate"
+    elif best_forces_mate and not second_forces_mate:
+        classification = "only_move"
+        only_move = True
+        reason = "uniquely_forces_mate"
+    elif (
+        cp_gap is not None
+        and best_utility >= -150
+        and second_utility < -150
+        and cp_gap >= 100
+    ):
+        classification = "only_move"
+        only_move = True
+        reason = "uniquely_preserves_a_playable_position"
+    elif cp_gap is not None and cp_gap >= 100:
+        classification = "clearly_best"
+        only_move = False
+        reason = "large_engine_gap"
+    else:
+        classification = "normal_best"
+        only_move = False
+        reason = "multiple_viable_moves"
+
+    return {
+        "classification": classification,
+        "only_move": only_move,
+        "reason": reason,
+        "best_vs_second_gap_cp": cp_gap,
+        "alternatives": alternatives,
+    }
+
+
 def add_decision_context(
     records: list[dict[str, Any]],
     initial_stockfish: dict[str, Any],
@@ -355,6 +480,7 @@ def add_decision_context(
         )
         evaluation_before = previous_stockfish.get("evaluation")
         evaluation_after = (record.get("stockfish") or {}).get("evaluation")
+        move_choice = _move_choice_evidence(previous_stockfish, record["side"])
 
         record["decision_context"] = {
             "evaluation_before": evaluation_before,
@@ -375,7 +501,8 @@ def add_decision_context(
             "played_matches_engine_first": played_matches,
             "critical_tactical_position": tactical_before,
             "critical_engine_response": played_matches and tactical_before,
-            "only_move": None,
+            "move_choice": move_choice,
+            "only_move": move_choice["only_move"],
             "material_before": _material_summary(
                 chess.Board(record["previous_fen"])
             ),
@@ -383,6 +510,88 @@ def add_decision_context(
         }
         previous_stockfish = record["stockfish"]
         previous_motifs = record.get("motifs") or []
+
+
+def _analyse_stockfish_position(
+    engine: Any,
+    board: chess.Board,
+    *,
+    depth: int,
+    max_seconds: float | None,
+    multipv: int,
+    game_token: object,
+) -> dict[str, Any]:
+    limit_kwargs: dict[str, Any] = {"depth": max(1, depth)}
+    if max_seconds is not None and max_seconds > 0:
+        limit_kwargs["time"] = max_seconds
+    try:
+        infos = engine.analyse(
+            board,
+            chess.engine.Limit(**limit_kwargs),
+            multipv=max(1, multipv),
+            game=game_token,
+        )
+    except Exception as exc:
+        raise AnalysisError(
+            "Stockfish could not evaluate a position in the uploaded game.",
+            code="stockfish_failed",
+            status_code=502,
+            retryable=True,
+        ) from exc
+
+    if isinstance(infos, dict):
+        infos = [infos]
+    top_lines = []
+    for rank, info in enumerate(infos, start=1):
+        if "score" not in info:
+            continue
+        pv = info.get("pv") or []
+        line_board = board.copy()
+        moves_san = []
+        for move in pv[:8]:
+            try:
+                moves_san.append(line_board.san(move))
+                line_board.push(move)
+            except (AssertionError, ValueError):
+                break
+        top_lines.append(
+            {
+                "rank": rank,
+                "evaluation": _normalize_engine_score(
+                    info["score"],
+                    board,
+                ),
+                "depth": info.get("depth"),
+                "seldepth": info.get("seldepth"),
+                "nodes": info.get("nodes"),
+                "time_ms": round(float(info.get("time", 0)) * 1000),
+                "moves_uci": [move.uci() for move in pv[:8]],
+                "moves_san": moves_san,
+            }
+        )
+    if not top_lines:
+        raise AnalysisError(
+            "Stockfish did not return an analysis line.",
+            code="stockfish_invalid_response",
+            status_code=502,
+            retryable=True,
+        )
+    return {
+        "target_depth": depth,
+        "depth": top_lines[0].get("depth"),
+        "seldepth": top_lines[0].get("seldepth"),
+        "nodes": top_lines[0].get("nodes"),
+        "time_ms": top_lines[0].get("time_ms"),
+        "multipv": multipv,
+        "time_limit_seconds": max_seconds,
+        "evaluation": top_lines[0]["evaluation"],
+        "best_move": (
+            top_lines[0]["moves_uci"][0]
+            if top_lines[0]["moves_uci"]
+            else None
+        ),
+        "top_lines": top_lines,
+    }
 
 
 def evaluate_with_stockfish(
@@ -418,85 +627,26 @@ def evaluate_with_stockfish(
             retryable=False,
         ) from exc
 
-    def evaluate_position(board: chess.Board) -> dict[str, Any]:
-        limit_kwargs: dict[str, Any] = {"depth": max(1, depth)}
-        if max_seconds is not None and max_seconds > 0:
-            limit_kwargs["time"] = max_seconds
-        try:
-            infos = engine.analyse(
-                board,
-                chess.engine.Limit(**limit_kwargs),
-                multipv=max(1, multipv),
-                game=game_token,
-            )
-        except Exception as exc:
-            raise AnalysisError(
-                "Stockfish could not evaluate a position in the uploaded game.",
-                code="stockfish_failed",
-                status_code=502,
-                retryable=True,
-            ) from exc
-
-        if isinstance(infos, dict):
-            infos = [infos]
-        top_lines = []
-        for rank, info in enumerate(infos, start=1):
-            if "score" not in info:
-                continue
-            pv = info.get("pv") or []
-            line_board = board.copy()
-            moves_san = []
-            for move in pv[:8]:
-                try:
-                    moves_san.append(line_board.san(move))
-                    line_board.push(move)
-                except (AssertionError, ValueError):
-                    break
-            top_lines.append(
-                {
-                    "rank": rank,
-                    "evaluation": _normalize_engine_score(
-                        info["score"],
-                        board,
-                    ),
-                    "depth": info.get("depth"),
-                    "seldepth": info.get("seldepth"),
-                    "nodes": info.get("nodes"),
-                    "time_ms": round(float(info.get("time", 0)) * 1000),
-                    "moves_uci": [move.uci() for move in pv[:8]],
-                    "moves_san": moves_san,
-                }
-            )
-        if not top_lines:
-            raise AnalysisError(
-                "Stockfish did not return an analysis line.",
-                code="stockfish_invalid_response",
-                status_code=502,
-                retryable=True,
-            )
-        return {
-            "target_depth": depth,
-            "depth": top_lines[0].get("depth"),
-            "seldepth": top_lines[0].get("seldepth"),
-            "nodes": top_lines[0].get("nodes"),
-            "time_ms": top_lines[0].get("time_ms"),
-            "multipv": multipv,
-            "time_limit_seconds": max_seconds,
-            "evaluation": top_lines[0]["evaluation"],
-            "best_move": (
-                top_lines[0]["moves_uci"][0]
-                if top_lines[0]["moves_uci"]
-                else None
-            ),
-            "top_lines": top_lines,
-        }
-
     try:
-        initial = evaluate_position(boards[0])
+        initial = _analyse_stockfish_position(
+            engine,
+            boards[0],
+            depth=depth,
+            max_seconds=max_seconds,
+            multipv=multipv,
+            game_token=game_token,
+        )
         previous_eval = initial["evaluation"]
 
         for record, board in zip(records, boards[1:]):
-            stockfish = evaluate_position(board)
+            stockfish = _analyse_stockfish_position(
+                engine,
+                board,
+                depth=depth,
+                max_seconds=max_seconds,
+                multipv=multipv,
+                game_token=game_token,
+            )
             current_eval = stockfish["evaluation"]
             previous_cp = (
                 previous_eval["value"]
@@ -571,6 +721,163 @@ def evaluate_with_stockfish(
             engine.quit()
         except Exception:
             pass
+
+
+def _critical_position_candidates(
+    records: list[dict[str, Any]],
+    initial_stockfish: dict[str, Any],
+) -> list[dict[str, Any]]:
+    candidates = []
+    previous_stockfish = initial_stockfish
+    previous_motifs: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        current_stockfish = record.get("stockfish") or {}
+        before = previous_stockfish.get("evaluation")
+        after = current_stockfish.get("evaluation")
+        move_quality = _move_quality(record, before, after)
+        previous_tactical = any(
+            motif.get("severity") in {"warning", "tactic", "tactical", "critical"}
+            for motif in previous_motifs
+            if isinstance(motif, dict)
+        )
+        current_tactical = any(
+            motif.get("severity") in {"warning", "tactic", "tactical", "critical"}
+            for motif in record.get("motifs") or []
+            if isinstance(motif, dict)
+        )
+        mover_loss = current_stockfish.get("mover_loss_cp")
+        previous_line = (previous_stockfish.get("top_lines") or [{}])[0]
+        previous_moves_uci = previous_line.get("moves_uci") or []
+        played_uci = (record.get("played_move") or {}).get("uci")
+        played_matches_engine_first = bool(
+            previous_moves_uci and played_uci == previous_moves_uci[0]
+        )
+
+        reasons = []
+        priority = 0
+        if move_quality in {
+            "allows_forced_mate",
+            "escapes_forced_mate",
+            "misses_forced_mate",
+            "creates_forced_mate",
+        }:
+            reasons.append(move_quality)
+            priority += 200
+        if isinstance(mover_loss, int) and mover_loss >= 80:
+            reasons.append("large_evaluation_change")
+            priority += min(mover_loss, 300)
+        if previous_tactical:
+            reasons.append("tactical_position_before_move")
+            priority += 80
+            if played_matches_engine_first:
+                reasons.append("engine_first_tactical_response")
+                priority += 80
+        if current_tactical:
+            reasons.append("tactical_position_after_move")
+            priority += 40
+
+        if reasons:
+            candidates.append(
+                {
+                    "record_index": index,
+                    "ply": record.get("ply"),
+                    "priority": priority,
+                    "reasons": reasons,
+                }
+            )
+
+        previous_stockfish = current_stockfish
+        previous_motifs = record.get("motifs") or []
+
+    return sorted(
+        candidates,
+        key=lambda candidate: (-candidate["priority"], candidate["record_index"]),
+    )
+
+
+def enrich_critical_positions_with_multipv(
+    records: list[dict[str, Any]],
+    initial_stockfish: dict[str, Any],
+    *,
+    depth: int,
+    max_seconds: float,
+    multipv: int,
+    max_positions: int,
+    threads: int,
+    hash_mb: int,
+) -> dict[str, Any]:
+    metadata = {
+        "enabled": multipv >= 2 and max_positions > 0 and max_seconds > 0,
+        "multipv": max(1, multipv),
+        "max_positions": max(0, max_positions),
+        "time_limit_seconds_per_position": max_seconds,
+        "positions_selected": 0,
+        "positions_analyzed": 0,
+        "selected_plies": [],
+        "search_time_ms": 0,
+        "wall_time_ms": 0,
+        "error": None,
+    }
+    if not metadata["enabled"]:
+        return metadata
+
+    candidates = _critical_position_candidates(records, initial_stockfish)
+    selected = candidates[:max_positions]
+    metadata["positions_selected"] = len(selected)
+    metadata["selected_plies"] = [candidate["ply"] for candidate in selected]
+    if not selected:
+        return metadata
+
+    boards = _stockfish_boards(records)
+    try:
+        engine = create_stockfish()
+    except AnalysisError as exc:
+        metadata["error"] = str(exc)
+        return metadata
+    game_token = object()
+    started = time.perf_counter()
+    try:
+        engine.configure(
+            {
+                "Threads": max(1, threads),
+                "Hash": max(16, hash_mb),
+            }
+        )
+        for candidate in selected:
+            index = candidate["record_index"]
+            target = initial_stockfish if index == 0 else records[index - 1]["stockfish"]
+            if len(target.get("top_lines") or []) >= multipv:
+                continue
+            comparison = _analyse_stockfish_position(
+                engine,
+                boards[index],
+                depth=depth,
+                max_seconds=max_seconds,
+                multipv=multipv,
+                game_token=game_token,
+            )
+            target["best_move"] = comparison["best_move"]
+            target["top_lines"] = comparison["top_lines"]
+            target["critical_multipv"] = {
+                "performed": True,
+                "reasons": candidate["reasons"],
+                "multipv": multipv,
+                "depth": comparison.get("depth"),
+                "time_ms": comparison.get("time_ms"),
+            }
+            metadata["positions_analyzed"] += 1
+            metadata["search_time_ms"] += int(comparison.get("time_ms") or 0)
+    except Exception as exc:
+        metadata["error"] = str(exc)
+    finally:
+        metadata["wall_time_ms"] = round(
+            (time.perf_counter() - started) * 1000
+        )
+        try:
+            engine.quit()
+        except Exception:
+            pass
+    return metadata
 
 
 def _lichess_headers() -> dict[str, str]:
@@ -1026,7 +1333,15 @@ def attach_lichess_evidence(
             or before_masters.get("opening")
             or before_players.get("opening")
         )
-        opening_context = context_for_opening(opening)
+        try:
+            study_context = context_for_position(
+                opening=opening,
+                previous_fen=record["previous_fen"],
+                fen=record["fen"],
+                move_uci=uci,
+            )
+        except StudyDatabaseError:
+            study_context = None
         practical_signal = _practical_signal(
             record,
             before_masters,
@@ -1042,7 +1357,6 @@ def attach_lichess_evidence(
 
         record["lichess"] = {
             "opening": opening,
-            "opening_context": opening_context,
             "theory_status": _theory_status(before_masters, played_masters),
             "filters": {
                 "rating_groups": list(rating_groups),
@@ -1065,6 +1379,7 @@ def attach_lichess_evidence(
                 "continuations": after_players.get("moves", [])[:5],
             },
         }
+        record["study"] = study_context
 
 
 def add_lichess_evidence(
@@ -1168,6 +1483,7 @@ def _analysis_id(
                 "fen": position["fen"],
                 "stockfish": position["stockfish"],
                 "lichess": position["lichess"],
+                "study": position.get("study"),
                 "motifs": position["motifs"],
             }
             for position in positions
@@ -1188,6 +1504,9 @@ def build_analysis(
     stockfish_depth: int = 24,
     stockfish_max_seconds: float | None = 1.25,
     stockfish_multipv: int = 1,
+    stockfish_critical_multipv: int = 4,
+    stockfish_critical_max_positions: int = 5,
+    stockfish_critical_max_seconds: float = 0.4,
     stockfish_threads: int = 1,
     stockfish_hash_mb: int = 64,
     stockfish_total_seconds: float | None = 16.0,
@@ -1246,7 +1565,29 @@ def build_analysis(
         speeds=speeds,
     )
     add_motif_evidence(positions, warnings)
+    critical_multipv = enrich_critical_positions_with_multipv(
+        positions,
+        initial_stockfish,
+        depth=stockfish_depth,
+        max_seconds=stockfish_critical_max_seconds,
+        multipv=stockfish_critical_multipv,
+        max_positions=stockfish_critical_max_positions,
+        threads=stockfish_threads,
+        hash_mb=stockfish_hash_mb,
+    )
+    stockfish_provider["critical_multipv"] = critical_multipv
+    if critical_multipv.get("error"):
+        warnings.append(
+            "Alternative-move comparison was unavailable for one or more "
+            "critical positions; coaching will avoid unsupported only-move claims."
+        )
     add_decision_context(positions, initial_stockfish)
+    studies = study_database_status()
+    if not studies["available"]:
+        warnings.append(
+            "The optional project study database was unavailable; engine, "
+            "Lichess, and motif evidence remain active."
+        )
 
     metadata = {
         key: value
@@ -1286,9 +1627,10 @@ def build_analysis(
                 for position in positions
             ),
         },
+        "studies": studies,
     }
     result: dict[str, Any] = {
-        "schema_version": 4,
+        "schema_version": 5,
         "metadata": metadata,
         "filters": {
             "lichess_rating_groups": list(rating_groups),

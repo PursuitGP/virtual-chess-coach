@@ -46,6 +46,7 @@ try:  # Package imports (Gunicorn / tests)
         lichess_status,
     )
     from .motifs import detect_motifs
+    from .study_database import study_database_status
 except ImportError:  # Script imports (`python backend/app.py`)
     from ai_coach import (
         AIConfigurationError,
@@ -62,6 +63,7 @@ except ImportError:  # Script imports (`python backend/app.py`)
         lichess_status,
     )
     from motifs import detect_motifs
+    from study_database import study_database_status
 
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -169,6 +171,15 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         STOCKFISH_DEPTH=_env_int("STOCKFISH_DEPTH", 24),
         STOCKFISH_MAX_SECONDS=_env_float("STOCKFISH_MAX_SECONDS", 1.25),
         STOCKFISH_MULTIPV=_env_int("STOCKFISH_MULTIPV", 1),
+        STOCKFISH_CRITICAL_MULTIPV=_env_int(
+            "STOCKFISH_CRITICAL_MULTIPV", 4
+        ),
+        STOCKFISH_CRITICAL_MAX_POSITIONS=_env_int(
+            "STOCKFISH_CRITICAL_MAX_POSITIONS", 5
+        ),
+        STOCKFISH_CRITICAL_MAX_SECONDS=_env_float(
+            "STOCKFISH_CRITICAL_MAX_SECONDS", 0.4
+        ),
         STOCKFISH_THREADS=_env_int("STOCKFISH_THREADS", 1),
         STOCKFISH_HASH_MB=_env_int("STOCKFISH_HASH_MB", 64),
         STOCKFISH_TOTAL_SECONDS=_env_float("STOCKFISH_TOTAL_SECONDS", 16.0),
@@ -211,9 +222,17 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         stockfish_path = find_stockfish_path()
         ai = gemini_status()
         lichess = lichess_status()
+        studies = study_database_status()
+        ready = bool(
+            stockfish_path
+            and ai["ready"]
+            and lichess["configured"]
+            and studies["available"]
+        )
         return jsonify(
             {
-                "status": "ok" if stockfish_path else "degraded",
+                "status": "ok" if ready else "degraded",
+                "ready": ready,
                 "environment": app.config["APP_ENV"],
                 "capabilities": {
                     "stockfish": {
@@ -224,6 +243,17 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                             "STOCKFISH_MAX_SECONDS"
                         ],
                         "multipv": app.config["STOCKFISH_MULTIPV"],
+                        "critical_multipv": {
+                            "multipv": app.config[
+                                "STOCKFISH_CRITICAL_MULTIPV"
+                            ],
+                            "max_positions": app.config[
+                                "STOCKFISH_CRITICAL_MAX_POSITIONS"
+                            ],
+                            "time_limit_seconds_per_position": app.config[
+                                "STOCKFISH_CRITICAL_MAX_SECONDS"
+                            ],
+                        },
                         "threads": app.config["STOCKFISH_THREADS"],
                         "hash_mb": app.config["STOCKFISH_HASH_MB"],
                         "total_time_budget_seconds": app.config[
@@ -240,6 +270,14 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                         "published_confidence_levels": ["high", "medium"],
                         "experimental_detectors_published": False,
                     },
+                    "studies": {
+                        **studies,
+                        "path": (
+                            studies["path"]
+                            if app.config["APP_ENV"] != "production"
+                            else None
+                        ),
+                    },
                 },
                 "limits": {
                     "max_pgn_bytes": app.config["MAX_PGN_BYTES"],
@@ -247,6 +285,29 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                     "max_analysis_plies": app.config["MAX_ANALYSIS_PLIES"],
                 },
             }
+        )
+
+    @app.get("/api/ready")
+    def ready():
+        stockfish_available = bool(find_stockfish_path())
+        ai_ready = gemini_status()["ready"]
+        lichess_configured = lichess_status()["configured"]
+        studies_available = study_database_status()["available"]
+        checks = {
+            "stockfish": stockfish_available,
+            "gemini": ai_ready,
+            "lichess": lichess_configured,
+            "studies": studies_available,
+        }
+        is_ready = all(checks.values())
+        return (
+            jsonify(
+                {
+                    "status": "ready" if is_ready else "not_ready",
+                    "checks": checks,
+                }
+            ),
+            200 if is_ready else 503,
         )
 
     def analyze_request():
@@ -287,6 +348,15 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 stockfish_depth=app.config["STOCKFISH_DEPTH"],
                 stockfish_max_seconds=app.config["STOCKFISH_MAX_SECONDS"],
                 stockfish_multipv=app.config["STOCKFISH_MULTIPV"],
+                stockfish_critical_multipv=app.config[
+                    "STOCKFISH_CRITICAL_MULTIPV"
+                ],
+                stockfish_critical_max_positions=app.config[
+                    "STOCKFISH_CRITICAL_MAX_POSITIONS"
+                ],
+                stockfish_critical_max_seconds=app.config[
+                    "STOCKFISH_CRITICAL_MAX_SECONDS"
+                ],
                 stockfish_threads=app.config["STOCKFISH_THREADS"],
                 stockfish_hash_mb=app.config["STOCKFISH_HASH_MB"],
                 stockfish_total_seconds=app.config[

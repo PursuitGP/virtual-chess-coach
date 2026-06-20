@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 
-PROMPT_VERSION = "2026-06-20.4"
+PROMPT_VERSION = "2026-06-20.5"
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 VALID_PERSPECTIVES = {"white", "black", "both"}
 
@@ -109,6 +109,7 @@ def _context_summary(position: dict[str, Any] | None) -> dict[str, Any] | None:
         },
         "decision_context": position.get("decision_context"),
         "motifs": position.get("motifs") or [],
+        "study": position.get("study"),
     }
 
 
@@ -122,6 +123,7 @@ def _required_coaching_points(position: dict[str, Any]) -> list[str]:
     stockfish = position.get("stockfish") or {}
     best_reply = ((stockfish.get("top_lines") or [{}])[0].get("moves_san") or [])
     motifs = position.get("motifs") or []
+    move_choice = decision.get("move_choice") or {}
 
     points.append(
         "Describe what the played move concretely changes on this board."
@@ -143,6 +145,39 @@ def _required_coaching_points(position: dict[str, Any]) -> list[str]:
                     f"forced mate for {after.get('leader')}."
                 ),
             ]
+        )
+    if decision.get("only_move") is True:
+        alternatives = move_choice.get("alternatives") or []
+        second_move = (
+            alternatives[1].get("move_san")
+            if len(alternatives) > 1
+            else None
+        )
+        subject = (
+            f"the played move {position.get('played_move', {}).get('san')}"
+            if decision.get("played_matches_engine_first")
+            else f"the engine defense {engine_choice.get('san')}"
+        )
+        reason = {
+            "uniquely_prevents_forced_mate": "uniquely prevents forced mate",
+            "uniquely_forces_mate": "uniquely preserves the forced mating line",
+            "uniquely_preserves_a_playable_position": (
+                "is the only compared move that preserves a playable evaluation"
+            ),
+        }.get(move_choice.get("reason"), "is uniquely necessary")
+        comparison = (
+            f"; the next-best engine move is {second_move}"
+            if second_move
+            else ""
+        )
+        points.append(
+            f"Explain that {subject} {reason}{comparison}, using the supplied "
+            "MultiPV comparison rather than opening memory."
+        )
+    elif move_choice.get("classification") == "clearly_best":
+        points.append(
+            "Explain the concrete engine gap that makes the first choice clearly "
+            "better than the alternatives, but do not call it the only move."
         )
     elif decision.get("critical_engine_response"):
         points.append(
@@ -241,6 +276,7 @@ def _condense_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
                 "stockfish": position.get("stockfish"),
                 "decision_context": position.get("decision_context"),
                 "lichess": position.get("lichess"),
+                "study": position.get("study"),
                 "motifs": position.get("motifs"),
                 "motifs_available": position.get("motifs_available"),
                 "sequence_context": {
@@ -278,9 +314,10 @@ def _build_prompt(analysis: dict[str, Any], perspective: str) -> str:
 You are the synthesis layer in an evidence-grounded chess coaching system.
 {perspective_instruction}
 
-The evidence package was produced by Stockfish, Lichess Opening Explorer, and
-custom chess motif detectors. Chess claims must be grounded in that package.
-Do not independently reconstruct the game or invent analysis.
+The evidence package was produced by Stockfish, Lichess Opening Explorer,
+custom chess motif detectors, and an optional project-authored study database.
+Chess claims must be grounded in that package. Do not independently reconstruct
+the game or invent analysis.
 
 Rules:
 1. Return JSON only, with this shape:
@@ -330,10 +367,12 @@ Rules:
 12. Material and objective evaluation are different. If material_before or
     material_after favors one side while the engine favors the other, explain
     that distinction when it is central to the position.
-13. Never say "only move" unless decision_context.only_move is true. When it is
-    null, use "engine's first choice" or "critical response" only if
-    critical_engine_response is true. Avoid empty superlatives such as "most
-    forcing" when the evidence supplies no comparison.
+13. Never say "only move" unless decision_context.only_move is true. This field
+    describes engine_first_choice. If played_matches_engine_first is false,
+    apply "only move" to the engine choice, never to the played move. Use
+    move_choice.reason and alternatives to explain the comparison. When
+    only_move is null, no alternatives were compared. Avoid empty superlatives
+    such as "most forcing" when the evidence supplies no comparison.
 14. On routine early moves with no critical_tactical_position, explain the
     move's board purpose and human plan. Do not spend a sentence merely saying
     the engine supports a standard move.
@@ -367,8 +406,10 @@ Rules:
     master and selected-rating statistics.
 27. Use an opening name only when it appears in lichess.opening. PGN metadata
     such as Event is descriptive user input, not proof of an opening name.
-28. Use opening_context only when a project-curated description is present.
-    Do not browse the internet or invent historical opening background.
+28. Use study only when a project-authored study entry is present. Study notes
+    are optional human context and never override Stockfish, the actual board,
+    or structured motifs. Do not browse the internet or invent historical
+    opening background.
 
 Perspective: {perspective}
 Prompt version: {PROMPT_VERSION}
@@ -404,9 +445,6 @@ def _allowed_refs(
     lichess = position.get("lichess") or {}
     if lichess.get("opening"):
         refs.add("lichess.opening")
-    opening_context = lichess.get("opening_context") or {}
-    if opening_context.get("description"):
-        refs.add("lichess.opening_context")
     if lichess.get("theory_status"):
         refs.add("lichess.theory_status")
     if lichess.get("practical_signal"):
@@ -423,6 +461,8 @@ def _allowed_refs(
     for motif in position.get("motifs") or []:
         if isinstance(motif, dict) and motif.get("id"):
             refs.add(f"motifs.{motif['id']}")
+    if position.get("study"):
+        refs.add("study.context")
     if previous_position:
         refs.add("context.previous_position")
     if next_position:

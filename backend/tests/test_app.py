@@ -57,6 +57,7 @@ class AppTests(unittest.TestCase):
     def test_health_and_endpoint_validation(self):
         client = self.make_app().test_client()
         self.assertEqual(client.get("/api/health").status_code, 200)
+        self.assertIn(client.get("/api/ready").status_code, {200, 503})
         self.assertEqual(client.post("/api/analyze").status_code, 400)
         self.assertEqual(client.post("/api/explain", json={}).status_code, 400)
 
@@ -87,6 +88,14 @@ class AppTests(unittest.TestCase):
             (1600,),
         )
         self.assertEqual(analyze.call_args.kwargs["stockfish_multipv"], 1)
+        self.assertEqual(
+            analyze.call_args.kwargs["stockfish_critical_multipv"],
+            4,
+        )
+        self.assertEqual(
+            analyze.call_args.kwargs["stockfish_critical_max_positions"],
+            5,
+        )
         self.assertEqual(analyze.call_args.kwargs["stockfish_hash_mb"], 64)
         self.assertEqual(
             analyze.call_args.kwargs["stockfish_total_seconds"],

@@ -96,6 +96,13 @@ function formatPercent(value) {
   return typeof value === "number" ? `${value.toFixed(1)}%` : "—";
 }
 
+function formatClassification(value) {
+  if (!value) return "Alternatives not compared";
+  return value
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 function hasCompleteEvidence(analysis) {
   return Boolean(
     analysis?.providers?.stockfish?.available &&
@@ -916,6 +923,38 @@ export default function App() {
                         []
                       ).join(" ") || "Unavailable"}
                     </p>
+                    <div className="evidence-row">
+                      <span>Move necessity</span>
+                      <strong>
+                        {formatClassification(
+                          currentRecord.decision_context?.move_choice
+                            ?.classification
+                        )}
+                      </strong>
+                    </div>
+                    {currentRecord.decision_context?.move_choice?.alternatives
+                      ?.length > 1 && (
+                      <div className="candidate-list">
+                        <strong>Compared engine choices</strong>
+                        {currentRecord.decision_context.move_choice.alternatives.map(
+                          (candidate) => (
+                            <div
+                              key={`${candidate.rank}-${candidate.move_uci}`}
+                            >
+                              <span>
+                                #{candidate.rank}{" "}
+                                {candidate.move_san ||
+                                  candidate.move_uci ||
+                                  "Unavailable"}
+                              </span>
+                              <small>
+                                {evaluationLabel(candidate.evaluation)}
+                              </small>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    )}
                   </div>
                 </details>
 
@@ -957,6 +996,29 @@ export default function App() {
                   </div>
                 </details>
 
+                {currentRecord.study && (
+                  <details>
+                    <summary>
+                      <span>Project study note</span>
+                      <small>{currentRecord.study.title}</small>
+                    </summary>
+                    <div className="evidence-block">
+                      <p className="opening-context">
+                        {currentRecord.study.summary}
+                      </p>
+                      {currentRecord.study.ideas?.length > 0 && (
+                        <ul className="motif-list">
+                          {currentRecord.study.ideas.map((idea) => (
+                            <li key={idea}>
+                              <span>{idea}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </details>
+                )}
+
                 <details>
                   <summary>
                     <span>Lichess opening explorer</span>
@@ -970,11 +1032,6 @@ export default function App() {
                         ? `${currentRecord.lichess.opening.eco || ""} ${currentRecord.lichess.opening.name || ""}`.trim()
                         : "No named opening returned"}
                     </p>
-                    {currentRecord.lichess.opening_context?.description && (
-                      <p className="opening-context">
-                        {currentRecord.lichess.opening_context.description}
-                      </p>
-                    )}
                     <LichessMove
                       label="Master games"
                       move={currentRecord.lichess.masters.played_move}

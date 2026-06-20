@@ -144,8 +144,8 @@ class AnalysisTests(unittest.TestCase):
             "King's Pawn Game",
         )
         self.assertEqual(
-            first["lichess"]["opening_context"]["family"],
-            "King's Pawn Game",
+            first["study"]["id"],
+            "kings-pawn-game-family",
         )
         self.assertIn(
             first["lichess"]["practical_signal"]["classification"],
@@ -161,6 +161,10 @@ class AnalysisTests(unittest.TestCase):
             result["providers"]["stockfish"]["total_time_budget_seconds"],
             16.0,
         )
+        self.assertTrue(
+            result["providers"]["stockfish"]["critical_multipv"]["enabled"]
+        )
+        self.assertTrue(result["providers"]["studies"]["available"])
 
     def test_terminal_mate_score_uses_board_winner(self):
         game = chess.pgn.read_game(io.StringIO("1. f3 e5 2. g4 Qh4#"))
@@ -265,6 +269,97 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(kg8["move_quality"], "allows_forced_mate")
         self.assertEqual(kg8["assessment_before"]["classification"], "slight_edge")
         self.assertEqual(kg8["assessment_after"]["classification"], "forced_mate")
+
+    def test_move_choice_distinguishes_only_move_from_clearly_best(self):
+        only_move = analysis._move_choice_evidence(
+            {
+                "top_lines": [
+                    {
+                        "rank": 1,
+                        "moves_san": ["Ke6"],
+                        "moves_uci": ["f7e6"],
+                        "evaluation": {
+                            "type": "cp",
+                            "value": 80,
+                            "pawns": 0.8,
+                        },
+                    },
+                    {
+                        "rank": 2,
+                        "moves_san": ["Kg8"],
+                        "moves_uci": ["f7g8"],
+                        "evaluation": {
+                            "type": "mate",
+                            "value": 5,
+                            "winner": "white",
+                        },
+                    },
+                ]
+            },
+            "black",
+        )
+        clearly_best = analysis._move_choice_evidence(
+            {
+                "top_lines": [
+                    {
+                        "rank": 1,
+                        "moves_san": ["d5"],
+                        "moves_uci": ["d7d5"],
+                        "evaluation": {"type": "cp", "value": 30},
+                    },
+                    {
+                        "rank": 2,
+                        "moves_san": ["Bc5"],
+                        "moves_uci": ["f8c5"],
+                        "evaluation": {"type": "cp", "value": 140},
+                    },
+                ]
+            },
+            "black",
+        )
+        self.assertTrue(only_move["only_move"])
+        self.assertEqual(
+            only_move["reason"],
+            "uniquely_prevents_forced_mate",
+        )
+        self.assertEqual(clearly_best["classification"], "clearly_best")
+        self.assertFalse(clearly_best["only_move"])
+
+    def test_critical_multipv_prioritizes_engine_first_tactical_responses(self):
+        records = [
+            {
+                "ply": 1,
+                "side": "white",
+                "played_move": {"uci": "e2e4"},
+                "stockfish": {
+                    "evaluation": {"type": "cp", "value": 20},
+                    "mover_loss_cp": 0,
+                    "top_lines": [{"moves_uci": ["e7e5"]}],
+                },
+                "motifs": [{"severity": "tactical"}],
+            },
+            {
+                "ply": 2,
+                "side": "black",
+                "played_move": {"uci": "e7e5"},
+                "stockfish": {
+                    "evaluation": {"type": "cp", "value": 25},
+                    "mover_loss_cp": 0,
+                    "top_lines": [{"moves_uci": ["g1f3"]}],
+                },
+                "motifs": [],
+            },
+        ]
+        initial = {
+            "evaluation": {"type": "cp", "value": 15},
+            "top_lines": [{"moves_uci": ["e2e4"]}],
+        }
+        candidates = analysis._critical_position_candidates(records, initial)
+        response = next(
+            candidate for candidate in candidates if candidate["ply"] == 2
+        )
+        self.assertIn("engine_first_tactical_response", response["reasons"])
+        self.assertGreater(response["priority"], 80)
 
     def test_total_stockfish_budget_bounds_long_openings(self):
         pgn = (ROOT / "pgns" / "immortal_game_clean.pgn").read_bytes()
