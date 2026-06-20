@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Stockfish and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y stockfish
+          python -m pip install -r backend/requirements.txt
+
+      - name: Backend tests
+        env:
+          GEMINI_API_KEY: ""
+          STOCKFISH_PATH: /usr/games/stockfish
+        run: python -m unittest discover -s backend/tests -v
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Frontend install and tests
+        run: |
+          npm ci
+          npm test -- --watchAll=false
+          npm run build
+
+      - name: Docker build
+        run: docker build -t virtual-chess-coach:test .

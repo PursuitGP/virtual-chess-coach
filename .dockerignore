@@ -1,0 +1,12 @@
+.git
+.github
+.codex
+.agents
+.venv
+node_modules
+build
+coverage
+*.log
+*.env
+backend/.env
+backend/stockfish

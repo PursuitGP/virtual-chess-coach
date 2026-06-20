@@ -1,19 +1,37 @@
-/* Minimal reset */ 
-* { box-sizing: border-box; }
-html, body, #root { height: 100%; margin: 0; }
-body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #e2e8f0; }
-a { color: inherit; }
-button { cursor: pointer; }
-.container { max-width: 1100px; margin: 0 auto; padding: 24px; }
-.card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 16px; box-shadow: 0 10px 20px rgba(0,0,0,0.25); }
-.controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.controls button { background: #1f2937; border: 1px solid #374151; color: #e5e7eb; padding: 8px 12px; border-radius: 10px; }
-.controls button:hover { background: #111827; }
-.grid { display: grid; grid-template-columns: 1fr 360px; gap: 16px; }
-@media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
-label { display:block; font-size: 12px; color: #9ca3af; margin-bottom: 6px; }
-textarea, input { width: 100%; background: #0b1220; color: #d1d5db; border: 1px solid #1f2937; border-radius: 10px; padding: 8px; }
-.history { max-height: 420px; overflow: auto; }
-.history ol { padding-left: 18px; }
-.badge { display:inline-flex; align-items:center; gap:6px; background:#0b1220; border:1px solid #1f2937; border-radius:9999px; padding:6px 10px; font-size:12px; color:#cbd5e1; }
-.small { font-size: 12px; color: #9ca3af; }
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at 15% 0%, rgba(42, 94, 78, 0.3), transparent 32rem),
+    #07110f;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  color: #e7eee9;
+  background:
+    linear-gradient(rgba(7, 17, 15, 0.82), rgba(7, 17, 15, 0.96)),
+    repeating-linear-gradient(
+      90deg,
+      transparent,
+      transparent 79px,
+      rgba(255, 255, 255, 0.015) 80px
+    );
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+::selection {
+  color: #03120d;
+  background: #8ed1b2;
+}

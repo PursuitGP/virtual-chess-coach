@@ -43,7 +43,6 @@ coverage/
 # React build artifacts
 frontend/build/
 frontend/node_modules/
-*.lock
 
 # ----------------------------
 # IDE / Editor
@@ -73,3 +72,4 @@ Thumbs.db
 **/.env
 *.env
 .env.*
+backend/stockfish/

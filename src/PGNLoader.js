@@ -1,4 +1,4 @@
-﻿import React, { useState } from "react";
+import React, { useState } from "react";
 import { Chess } from "chess.js";
 
 /**
@@ -12,9 +12,6 @@ export default function PGNLoader({ onParsed }) {
   const [error, setError] = useState("");
   const [headers, setHeaders] = useState(null);
   const [normalizedText, setNormalizedText] = useState("");
-  const [normalize, setNormalize] = useState(true);
-
-  // NEW: pasted PGN text
   const [pastedText, setPastedText] = useState("");
 
   const KEEP_TAGS = new Set([
@@ -174,6 +171,29 @@ export default function PGNLoader({ onParsed }) {
   }
 
   // ------------------ UI handlers ------------------
+  function processPGN(raw, filename) {
+    const cleaned = normalizePGN(raw);
+    setNormalizedText(cleaned);
+
+    try {
+      const { headers: hdrs, moves } = tryParseCompat(cleaned);
+      const normalizedFile = new File([cleaned], filename, {
+        type: "application/x-chess-pgn",
+      });
+      setHeaders(hdrs);
+      setError("");
+      onParsed?.({
+        headers: hdrs,
+        moves,
+        file: normalizedFile,
+        raw: cleaned,
+      });
+    } catch (err) {
+      console.error("PGN parse error:", err);
+      setError(err?.message || "Could not parse PGN.");
+    }
+  }
+
   function handleFile(e) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -186,18 +206,7 @@ export default function PGNLoader({ onParsed }) {
     const reader = new FileReader();
     reader.onload = (evt) => {
       const raw = String(evt.target.result || "");
-      const cleaned = normalize ? normalizePGN(raw) : raw;
-      setNormalizedText(cleaned);
-
-      try {
-        const { headers: hdrs, moves } = tryParseCompat(cleaned);
-        setHeaders(hdrs);
-        setError("");
-        onParsed?.({ headers: hdrs, moves, file, raw: cleaned });
-      } catch (err) {
-        console.error("PGN parse error:", err);
-        setError(err?.message || "Could not parse PGN.");
-      }
+      processPGN(raw, file.name);
     };
     reader.readAsText(file);
   }
@@ -209,24 +218,19 @@ export default function PGNLoader({ onParsed }) {
       return;
     }
 
-    const raw = pastedText;
-    const cleaned = normalize ? normalizePGN(raw) : raw;
+    processPGN(pastedText, "pasted_game.pgn");
+  }
 
-    setNormalizedText(cleaned);
-
-    // Create a virtual file so backend still works
-    const virtualFile = new File([cleaned], "pasted_game.pgn", {
-      type: "text/plain",
-    });
-
+  async function handleLoadExample() {
     try {
-      const { headers: hdrs, moves } = tryParseCompat(cleaned);
-      setHeaders(hdrs);
       setError("");
-      onParsed?.({ headers: hdrs, moves, file: virtualFile, raw: cleaned });
+      const response = await fetch("/examples/scholars_mate.pgn");
+      if (!response.ok) throw new Error("Example PGN is unavailable.");
+      const text = await response.text();
+      setPastedText(text);
+      processPGN(text, "scholars_mate.pgn");
     } catch (err) {
-      console.error("PGN paste parse error:", err);
-      setError(err?.message || "Could not parse pasted PGN.");
+      setError(err?.message || "Could not load the example game.");
     }
   }
 
@@ -270,14 +274,19 @@ export default function PGNLoader({ onParsed }) {
 
   // --------------------------------------------------
   return (
-    <div>
+    <div className="pgn-loader">
       {/* FILE UPLOAD */}
-      <input
-        type="file"
-        accept=".pgn"
-        onChange={handleFile}
-        className="pgn-upload"
-      />
+      <div className="pgn-actions">
+        <input
+          type="file"
+          accept=".pgn"
+          onChange={handleFile}
+          className="pgn-upload"
+        />
+        <button type="button" className="btn ghost" onClick={handleLoadExample}>
+          Try example game
+        </button>
+      </div>
 
       {error && <p className="error">{error}</p>}
 
@@ -288,7 +297,7 @@ export default function PGNLoader({ onParsed }) {
         </label>
         <textarea
           rows={6}
-          placeholder="Paste PGN here…"
+          placeholder={'[White "Player"]\n[Black "Opponent"]\n\n1. e4 e5 2. Nf3 Nc6'}
           style={{
             width: "100%",
             marginTop: 6,
