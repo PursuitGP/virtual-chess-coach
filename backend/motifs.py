@@ -8,6 +8,67 @@ import math
 
 MAX_OPENING_MOVE = 10  # used for early-queen, theory-ish ideas
 
+# Only motifs with a concrete, testable board-state definition are published
+# to the coaching pipeline. The remaining detectors stay available through the
+# development endpoint so they can be hardened with fixtures instead of being
+# silently treated as reliable chess evidence.
+MOTIF_CONFIDENCE = {
+    "forced_mate": "high",
+    "absolute_pin": "high",
+    "double_check": "high",
+    "opposite_side_castling": "high",
+    "bishop_pair": "high",
+    "isolated_pawn": "high",
+    "doubled_pawns": "high",
+    "passed_pawn": "high",
+    "attraction": "medium",
+    "center_counterstrike": "medium",
+    "c2_c7_weakness": "medium",
+    "connect_the_rooks": "medium",
+    "development_lead": "medium",
+    "diagonal_pressure": "medium",
+    "discovered_attack": "medium",
+    "equal_trade": "medium",
+    "f2_f7_weakness": "medium",
+    "fork": "medium",
+    "interference": "medium",
+    "meet_the_center": "medium",
+    "open_file_control": "medium",
+    "outpost": "medium",
+    "pawn_majority": "medium",
+    "relative_pin": "medium",
+    "semi_open_file": "medium",
+    "take_the_center": "medium",
+}
+MAX_PUBLISHED_MOTIFS = 12
+
+
+def publish_motifs(motifs, *, include_experimental=False):
+    """Annotate, de-duplicate, and confidence-gate detector output."""
+    published = []
+    seen = set()
+    for motif in motifs:
+        confidence = MOTIF_CONFIDENCE.get(motif.get("id"), "experimental")
+        if confidence == "experimental" and not include_experimental:
+            continue
+        annotated = {**motif, "confidence": confidence}
+        extra = annotated.get("extra") or {}
+        key = (
+            annotated.get("id"),
+            annotated.get("side"),
+            repr(sorted(extra.items())),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        published.append(annotated)
+
+    priority = {"high": 0, "medium": 1, "experimental": 2}
+    published.sort(key=lambda motif: priority[motif["confidence"]])
+    if include_experimental:
+        return published
+    return published[:MAX_PUBLISHED_MOTIFS]
+
 def compute_eval_delta(prev_eval, current_eval):
     """Eval values are in centipawns."""
     if prev_eval is None or current_eval is None:
@@ -416,6 +477,11 @@ def development_lead(board, move_number, eval_cp, prev_eval=None, last_move_uci=
     black_knights = list(board.pieces(chess.KNIGHT, chess.BLACK))
     white_bishops = list(board.pieces(chess.BISHOP, chess.WHITE))
     black_bishops = list(board.pieces(chess.BISHOP, chess.BLACK))
+
+    # Once a minor piece has been traded or sacrificed, a raw count of pieces
+    # off their home rank no longer represents a development race.
+    if len(white_knights) + len(white_bishops) != len(black_knights) + len(black_bishops):
+        return motifs
 
     white_dev = sum(1 for sq in white_knights if chess.square_rank(sq) > 0) \
                 + sum(1 for sq in white_bishops if chess.square_rank(sq) > 0)
@@ -2426,19 +2492,42 @@ def early_queen_exposure(board, move_number, eval_cp, prev_eval=None, **kwargs):
 
     return motifs
 
-def equal_trade(board, move_number, eval_cp, prev_eval=None, **kwargs):
+def equal_trade(
+    board,
+    move_number,
+    eval_cp,
+    prev_eval=None,
+    prev_board=None,
+    last_move_uci=None,
+    **kwargs,
+):
     """
-    Equal Trade – small change in evaluation after recent exchanges.
-    Heuristic: if eval_delta is very small, we flag a likely equal trade.
+    Equal Trade – an equal-value capture with a small evaluation change.
     """
     motifs = []
-    if prev_eval is None:
+    if prev_eval is None or prev_board is None or not last_move_uci:
+        return motifs
+
+    try:
+        move = chess.Move.from_uci(last_move_uci)
+    except ValueError:
+        return motifs
+    moving_piece = prev_board.piece_at(move.from_square)
+    captured_piece = prev_board.piece_at(move.to_square)
+    if prev_board.is_en_passant(move):
+        captured_piece = chess.Piece(chess.PAWN, not prev_board.turn)
+    if (
+        moving_piece is None
+        or captured_piece is None
+        or move.promotion is not None
+        or piece_value(moving_piece.piece_type)
+        != piece_value(captured_piece.piece_type)
+    ):
         return motifs
 
     eval_delta = compute_eval_delta(prev_eval, eval_cp)
 
-    # Tiny eval swing → likely equal trade or quiet move
-    if abs(eval_delta) <= 30:  # ~0.3 pawn
+    if abs(eval_delta) <= 40:
         motifs.append(
             make_motif(
                 "equal_trade",
@@ -2448,7 +2537,11 @@ def equal_trade(board, move_number, eval_cp, prev_eval=None, **kwargs):
                 severity="info",
                 eval_cp=eval_cp,
                 eval_delta_cp=eval_delta,
-                extra={"eval_delta_cp": eval_delta},
+                extra={
+                    "capturing_piece": chess.piece_name(moving_piece.piece_type),
+                    "captured_piece": chess.piece_name(captured_piece.piece_type),
+                    "eval_delta_cp": eval_delta,
+                },
             )
         )
 
@@ -3175,6 +3268,7 @@ def detect_motifs(
     sf_raw=None,
     last_move_uci=None,
     prev_move_uci=None,
+    include_experimental=False,
 ):
     """
     Central entry point for all motif detection.
@@ -3212,7 +3306,10 @@ def detect_motifs(
                 eval_delta_cp=compute_eval_delta(prev_eval, eval_cp),
             )
         )
-        return motifs  # STOP — tactical override
+        return publish_motifs(
+            motifs,
+            include_experimental=include_experimental,
+        )
 
     # ---------------------------------------------------
     # 1. NORMAL MOTIF DISPATCH
@@ -3237,6 +3334,8 @@ def detect_motifs(
         except Exception:
             continue  # fail silently per motif
 
-    return motifs
-
+    return publish_motifs(
+        motifs,
+        include_experimental=include_experimental,
+    )
 

@@ -72,4 +72,6 @@ Thumbs.db
 **/.env
 *.env
 .env.*
+!.env.example
+!**/.env.example
 backend/stockfish/

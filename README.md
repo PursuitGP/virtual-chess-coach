@@ -13,7 +13,7 @@ The project is deliberately not built around an unaided chatbot. General-purpose
 ```text
 PGN
  └─> legal moves and FEN positions
-      ├─> Stockfish evaluation, change, best move, and MultiPV lines
+      ├─> Stockfish evaluation, change, best move, and principal variation
       ├─> Lichess master and rating-filtered player statistics
       └─> custom tactical and positional motif detection
              └─> structured evidence package
@@ -43,17 +43,32 @@ PGN
 For each analyzed ply, the backend records:
 
 - The played move, acting side, previous FEN, and resulting FEN
-- Stockfish evaluation, mover-specific evaluation loss, best move, and three MultiPV lines
+- Stockfish evaluation, mover-specific evaluation loss, best move, and principal variation
 - Lichess master and rating-filtered aggregate-player frequency, win, draw, loss, and score statistics
 - Up to five likely continuations from each database
 - Engine-backed practical continuation candidates that join Stockfish lines to human frequency and results
 - Conservative signals such as `master-aligned-and-sound`, `common-rating-pool-mistake`, and `sound-novelty-candidate`
 - Curated opening names/ECO codes plus short project-authored context for common opening families
-- Custom positional and tactical motifs
+- Confidence-gated positional and tactical motifs
 
 Theory classification is calculated against the position before the move was played. “Novelty” is always labeled as a candidate: absence from the selected sample does not prove historical novelty. Lichess statistics are treated as descriptions of human behavior, never as objective evaluations.
 
-Duplicate Lichess position queries are cached and made sequentially in accordance with Lichess API guidance. One bounded Stockfish process produces true MultiPV lines for the initial position and every analyzed ply.
+Duplicate Lichess position queries are cached and made sequentially in accordance with Lichess API guidance. The Lichess fetch stream runs concurrently with one bounded Stockfish process, so network latency overlaps the engine batch without spawning an unsafe number of engine workers. A per-database circuit breaker stops an outage from turning into dozens of repeated timeouts. Stockfish retains the game history needed for repetition-aware analysis.
+
+The default opening window is 20 plies—ten White-and-Black move pairs—and therefore requires 21 engine searches including the initial position. Stockfish stops when it reaches either target depth 24 or the 1.25-second per-position ceiling. The API records the actual depth, selective depth, nodes, and search time instead of implying that the target depth was always reached. MultiPV defaults to one because official Stockfish guidance recommends it for the strongest best-line search; alternative human continuations come from Lichess.
+
+The production image builds a pinned Stockfish 18 binary from the official source tag. Runtime defaults use one engine thread and 64 MB of hash so the service remains bounded on a small portfolio deployment.
+
+### Motif confidence boundary
+
+The custom motif engine is intentionally treated as a developing domain system rather than an infallible classifier:
+
+- High-confidence motifs have literal, directly testable board-state definitions, such as forced mate, absolute pins, double check, bishop pair, and pawn-structure facts.
+- Medium-confidence motifs encode useful but more interpretive concepts, such as development leads, center counterstrikes, Fried Liver attraction, and diagonal pressure.
+- Experimental detectors remain in the codebase but are withheld from Gemini until position fixtures demonstrate acceptable precision.
+- The evidence package records how many experimental candidates were suppressed.
+
+The Fried Liver line `1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 d5 5. exd5 Nxd5 6. Nxf7 Kxf7 7. Qf3+ Kg8` is covered as a regression fixture for diagonal pressure, the f7 weakness, the knight fork, king attraction, the absolute pin, and the resulting forced mate.
 
 ### AI coaching
 
@@ -101,7 +116,7 @@ Browser ──> Gunicorn / Flask ──> Stockfish process
 | --- | --- |
 | Interface | React 19, Chessground, chess.js, Chart.js |
 | API | Python 3.12+, Flask, Gunicorn |
-| Engine | Stockfish |
+| Engine | Stockfish 18 in production |
 | Chess data | Lichess Opening Explorer |
 | Domain logic | python-chess and a custom motif engine |
 | AI synthesis | Google GenAI SDK with Gemini |
@@ -206,7 +221,10 @@ Public defaults are intentionally conservative:
 
 - Maximum upload: 256 KB
 - Maximum analysis: 20 plies
-- Public Stockfish depth in Docker: 14
+- Stockfish 18 target depth: 24
+- Per-position engine ceiling: 1.25 seconds
+- Stockfish MultiPV: 1
+- Stockfish resources: 1 thread and 64 MB hash
 - One Gunicorn worker with two request threads
 - Analysis limit: 20 requests per IP per hour
 - Gemini limit: 5 requests per IP per hour
@@ -233,13 +251,35 @@ python scripts/benchmark_analysis.py --offline
 
 Remove `--offline` to include live Lichess requests.
 
+Benchmark only the configured Stockfish contract:
+
+```bash
+python scripts/benchmark_stockfish.py
+```
+
+The Stockfish benchmark reports the exact engine build, achieved
+minimum/median/maximum depth, search time, and total wall time. Re-run it on the
+deployment machine because depth reached within a time limit depends on
+available CPU.
+
+Reference measurement on the maintainer's Apple Silicon development machine
+with Stockfish 18:
+
+| Workload | Wall time | Achieved depth |
+| --- | ---: | --- |
+| Full 20-ply live evidence request | 26.45 s | min 18 / median 20 / max 23 |
+| 14-ply Fried Liver live evidence request | 17.54 s | median 23 |
+
+These are measurements, not cross-machine guarantees. Stockfish and Lichess run
+concurrently, so the live request is governed mainly by the slower provider.
+
 Verify configured external credentials with minimal requests:
 
 ```bash
 python scripts/check_providers.py
 ```
 
-The tests cover PGN parsing, Unicode and headerless games, upload limits, Stockfish MultiPV normalization, rating-filtered Lichess request shapes and outcomes, provider failure behavior, theory alignment, motif smoke checks, AI schema validation, unsupported evidence rejection, caching, incomplete-evidence rejection, rate limits, frontend evaluation helpers, and production compilation.
+The tests cover PGN parsing, Unicode and headerless games, upload limits, Stockfish search metadata and principal-variation normalization, rating-filtered Lichess request shapes and outcomes, provider failure behavior, theory alignment, confidence-gated motifs, the Fried Liver regression line, AI schema validation, unsupported evidence rejection, caching, incomplete-evidence rejection, rate limits, frontend evaluation helpers, and production compilation.
 
 ## Deployment
 
@@ -248,7 +288,7 @@ The repository includes a multi-stage `Dockerfile` and `railway.toml`.
 1. Create a Railway project from this repository.
 2. Let Railway build the included Dockerfile.
 3. Add `GEMINI_API_KEY` and `LICHESS_TOKEN` as secrets.
-4. Keep `APP_ENV=production`, `TRUST_PROXY=true`, and `STOCKFISH_DEPTH=14`.
+4. Keep the bounded Stockfish defaults unless Railway benchmarks justify changing them.
 5. Confirm `/api/health` before sharing the URL.
 
 The service is deployment-ready at the repository level, but this README does not claim a live public deployment until one has been created and monitored.
@@ -256,7 +296,7 @@ The service is deployment-ready at the repository level, but this README does no
 ## Known limitations
 
 - Analysis is intentionally opening-focused and defaults to the first 20 plies.
-- Motifs are handcrafted heuristics. They encode meaningful chess knowledge but can produce false positives or miss concepts.
+- Published motifs are confidence-gated handcrafted heuristics. They can still miss concepts, while experimental detectors remain withheld pending fixture-based validation.
 - Lichess statistics may be sparse or unavailable for unusual positions.
 - Opening descriptions are short project-authored summaries for common families; Lichess supplies the opening name and ECO code but not a stable description field.
 - Stockfish lines are converted to SAN for display, while UCI remains in the evidence package for exact machine alignment.
@@ -266,7 +306,7 @@ The service is deployment-ready at the repository level, but this README does no
 
 ## Roadmap
 
-- Add fixture-based accuracy tests for individual motif detectors
+- Expand motif fixtures beyond the Fried Liver and promote experimental detectors only after precision checks
 - Add optional individual-player Lichess exploration in addition to the current aggregate rating filters
 - Add queued full-game analysis after the opening workflow is stable
 - Add persistent shared caching if public usage justifies it

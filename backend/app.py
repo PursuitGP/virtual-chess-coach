@@ -77,6 +77,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 class SlidingWindowLimiter:
     """Small in-memory limiter suitable for a single portfolio deployment."""
 
@@ -159,7 +166,11 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         MAX_CONTENT_LENGTH=_env_int("MAX_REQUEST_BYTES", 2 * 1024 * 1024),
         MAX_PGN_BYTES=_env_int("MAX_PGN_BYTES", 256 * 1024),
         MAX_ANALYSIS_PLIES=_env_int("MAX_ANALYSIS_PLIES", 20),
-        STOCKFISH_DEPTH=_env_int("STOCKFISH_DEPTH", 18),
+        STOCKFISH_DEPTH=_env_int("STOCKFISH_DEPTH", 24),
+        STOCKFISH_MAX_SECONDS=_env_float("STOCKFISH_MAX_SECONDS", 1.25),
+        STOCKFISH_MULTIPV=_env_int("STOCKFISH_MULTIPV", 1),
+        STOCKFISH_THREADS=_env_int("STOCKFISH_THREADS", 1),
+        STOCKFISH_HASH_MB=_env_int("STOCKFISH_HASH_MB", 64),
         ANALYSIS_RATE_LIMIT=_env_int("ANALYSIS_RATE_LIMIT", 20),
         EXPLAIN_RATE_LIMIT=_env_int("EXPLAIN_RATE_LIMIT", 5),
         DISABLE_RATE_LIMITS=_env_bool("DISABLE_RATE_LIMITS", False),
@@ -207,13 +218,24 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                     "stockfish": {
                         "available": bool(stockfish_path),
                         "path": stockfish_path if app.config["APP_ENV"] != "production" else None,
+                        "target_depth": app.config["STOCKFISH_DEPTH"],
+                        "time_limit_seconds_per_position": app.config[
+                            "STOCKFISH_MAX_SECONDS"
+                        ],
+                        "multipv": app.config["STOCKFISH_MULTIPV"],
+                        "threads": app.config["STOCKFISH_THREADS"],
+                        "hash_mb": app.config["STOCKFISH_HASH_MB"],
                     },
                     "gemini": ai,
                     "lichess": {
                         **lichess,
                         "verified": False,
                     },
-                    "motifs": {"available": True},
+                    "motifs": {
+                        "available": True,
+                        "published_confidence_levels": ["high", "medium"],
+                        "experimental_detectors_published": False,
+                    },
                 },
                 "limits": {
                     "max_pgn_bytes": app.config["MAX_PGN_BYTES"],
@@ -259,6 +281,10 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 pgn_bytes,
                 max_plies=app.config["MAX_ANALYSIS_PLIES"],
                 stockfish_depth=app.config["STOCKFISH_DEPTH"],
+                stockfish_max_seconds=app.config["STOCKFISH_MAX_SECONDS"],
+                stockfish_multipv=app.config["STOCKFISH_MULTIPV"],
+                stockfish_threads=app.config["STOCKFISH_THREADS"],
+                stockfish_hash_mb=app.config["STOCKFISH_HASH_MB"],
                 lichess_ratings=ratings,
                 lichess_speeds=speeds,
             )
@@ -416,6 +442,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 or data.get("last_move_uci"),
                 prev_move_uci=data.get("previous_move_uci")
                 or data.get("prev_move_uci"),
+                include_experimental=bool(data.get("include_experimental")),
             )
             return jsonify({"motifs": motifs_found})
         except ValueError:

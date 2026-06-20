@@ -7,7 +7,9 @@ import io
 import json
 import os
 import shutil
+import statistics
 import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any
 
@@ -17,10 +19,10 @@ import chess.pgn
 import requests
 
 try:
-    from .motifs import detect_motifs
+    from .motifs import MOTIF_CONFIDENCE, detect_motifs, publish_motifs
     from .opening_context import context_for_opening
 except ImportError:
-    from motifs import detect_motifs
+    from motifs import MOTIF_CONFIDENCE, detect_motifs, publish_motifs
     from opening_context import context_for_opening
 
 
@@ -104,6 +106,34 @@ def create_stockfish():
             retryable=False,
         )
     return chess.engine.SimpleEngine.popen_uci(path)
+
+
+def _stockfish_boards(records: list[dict[str, Any]]) -> list[chess.Board]:
+    """Rebuild the game history so Stockfish can account for repetition state."""
+    if not records:
+        raise AnalysisError(
+            "No positions were supplied to Stockfish.",
+            code="stockfish_invalid_request",
+        )
+
+    board = chess.Board(records[0]["previous_fen"])
+    boards = [board.copy(stack=True)]
+    for record in records:
+        try:
+            move = chess.Move.from_uci(record["played_move"]["uci"])
+        except ValueError as exc:
+            raise AnalysisError(
+                "The parsed game contained an invalid move.",
+                code="stockfish_invalid_request",
+            ) from exc
+        if move not in board.legal_moves:
+            raise AnalysisError(
+                "The parsed game contained an illegal move.",
+                code="stockfish_invalid_request",
+            )
+        board.push(move)
+        boards.append(board.copy(stack=True))
+    return boards
 
 
 def _decode_pgn(pgn_bytes: bytes) -> str:
@@ -202,16 +232,45 @@ def evaluate_with_stockfish(
     records: list[dict[str, Any]],
     *,
     depth: int,
-) -> dict[str, Any]:
+    max_seconds: float | None = 1.25,
+    multipv: int = 1,
+    threads: int = 1,
+    hash_mb: int = 64,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     engine = create_stockfish()
+    boards = _stockfish_boards(records)
+    game_token = object()
+    started = time.perf_counter()
 
-    def evaluate_position(fen: str) -> dict[str, Any]:
-        board = chess.Board(fen)
+    try:
+        engine.configure(
+            {
+                "Threads": max(1, threads),
+                "Hash": max(16, hash_mb),
+            }
+        )
+    except (chess.engine.EngineError, TypeError, AttributeError) as exc:
+        try:
+            engine.quit()
+        except Exception:
+            pass
+        raise AnalysisError(
+            "Stockfish rejected the configured resource limits.",
+            code="stockfish_invalid_configuration",
+            status_code=500,
+            retryable=False,
+        ) from exc
+
+    def evaluate_position(board: chess.Board) -> dict[str, Any]:
+        limit_kwargs: dict[str, Any] = {"depth": max(1, depth)}
+        if max_seconds is not None and max_seconds > 0:
+            limit_kwargs["time"] = max_seconds
         try:
             infos = engine.analyse(
                 board,
-                chess.engine.Limit(depth=depth),
-                multipv=3,
+                chess.engine.Limit(**limit_kwargs),
+                multipv=max(1, multipv),
+                game=game_token,
             )
         except Exception as exc:
             raise AnalysisError(
@@ -240,6 +299,10 @@ def evaluate_with_stockfish(
                 {
                     "rank": rank,
                     "evaluation": _normalize_engine_score(info["score"]),
+                    "depth": info.get("depth"),
+                    "seldepth": info.get("seldepth"),
+                    "nodes": info.get("nodes"),
+                    "time_ms": round(float(info.get("time", 0)) * 1000),
                     "moves_uci": [move.uci() for move in pv[:8]],
                     "moves_san": moves_san,
                 }
@@ -252,7 +315,13 @@ def evaluate_with_stockfish(
                 retryable=True,
             )
         return {
-            "depth": depth,
+            "target_depth": depth,
+            "depth": top_lines[0].get("depth"),
+            "seldepth": top_lines[0].get("seldepth"),
+            "nodes": top_lines[0].get("nodes"),
+            "time_ms": top_lines[0].get("time_ms"),
+            "multipv": multipv,
+            "time_limit_seconds": max_seconds,
             "evaluation": top_lines[0]["evaluation"],
             "best_move": (
                 top_lines[0]["moves_uci"][0]
@@ -263,11 +332,11 @@ def evaluate_with_stockfish(
         }
 
     try:
-        initial = evaluate_position(records[0]["previous_fen"])
+        initial = evaluate_position(boards[0])
         previous_eval = initial["evaluation"]
 
-        for record in records:
-            stockfish = evaluate_position(record["fen"])
+        for record, board in zip(records, boards[1:]):
+            stockfish = evaluate_position(board)
             current_eval = stockfish["evaluation"]
             previous_cp = (
                 previous_eval["value"]
@@ -304,7 +373,39 @@ def evaluate_with_stockfish(
             )
             record["stockfish"] = stockfish
             previous_eval = current_eval
-        return initial
+
+        all_evaluations = [initial] + [
+            record["stockfish"] for record in records
+        ]
+        achieved_depths = [
+            value["depth"]
+            for value in all_evaluations
+            if isinstance(value.get("depth"), int)
+        ]
+        search_time_ms = sum(
+            int(value.get("time_ms") or 0) for value in all_evaluations
+        )
+        engine_name = str(getattr(engine, "id", {}).get("name") or "Stockfish")
+        provider = {
+            "available": True,
+            "engine": engine_name,
+            "target_depth": depth,
+            "time_limit_seconds_per_position": max_seconds,
+            "multipv": multipv,
+            "threads": threads,
+            "hash_mb": hash_mb,
+            "positions_evaluated": len(all_evaluations),
+            "search_time_ms": search_time_ms,
+            "wall_time_ms": round((time.perf_counter() - started) * 1000),
+            "achieved_depth": {
+                "minimum": min(achieved_depths) if achieved_depths else None,
+                "median": statistics.median(achieved_depths)
+                if achieved_depths
+                else None,
+                "maximum": max(achieved_depths) if achieved_depths else None,
+            },
+        }
+        return initial, provider
     finally:
         try:
             engine.quit()
@@ -637,19 +738,20 @@ def _practical_candidates(
     return candidates
 
 
-def add_lichess_evidence(
+def collect_lichess_evidence(
     records: list[dict[str, Any]],
-    warnings: list[str],
     *,
     rating_groups: tuple[int, ...] = (),
     speeds: tuple[str, ...] = (),
-) -> None:
+) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[str, Any]]:
+    started = time.perf_counter()
     unique_fens = {
         fen
         for record in records
         for fen in (record["previous_fen"], record["fen"])
     }
     explorer_cache: dict[tuple[str, str], dict[str, Any]] = {}
+    database_failures: dict[str, str] = {}
 
     def load_explorer(fen: str, database: str):
         try:
@@ -676,11 +778,35 @@ def add_lichess_evidence(
     # Lichess explicitly asks API clients to make one request at a time.
     for fen in sorted(unique_fens):
         for database in ("masters", "lichess"):
-            explorer_cache[(fen, database)] = load_explorer(fen, database)
+            if database in database_failures:
+                explorer_cache[(fen, database)] = _unavailable_explorer(
+                    database_failures[database]
+                )
+                continue
+            result = load_explorer(fen, database)
+            explorer_cache[(fen, database)] = result
+            if not result.get("available"):
+                database_failures[database] = result.get("reason") or (
+                    "Lichess Opening Explorer was unavailable."
+                )
 
-    if any(
-        not value.get("available") for value in explorer_cache.values()
-    ):
+    metadata = {
+        "wall_time_ms": round((time.perf_counter() - started) * 1000),
+        "positions_requested": len(unique_fens),
+        "database_failures": database_failures,
+    }
+    return explorer_cache, metadata
+
+
+def attach_lichess_evidence(
+    records: list[dict[str, Any]],
+    warnings: list[str],
+    explorer_cache: dict[tuple[str, str], dict[str, Any]],
+    *,
+    rating_groups: tuple[int, ...] = (),
+    speeds: tuple[str, ...] = (),
+) -> None:
+    if any(not value.get("available") for value in explorer_cache.values()):
         warnings.append(
             "Some Lichess Opening Explorer data was unavailable; coaching will identify missing statistical context."
         )
@@ -735,6 +861,28 @@ def add_lichess_evidence(
         }
 
 
+def add_lichess_evidence(
+    records: list[dict[str, Any]],
+    warnings: list[str],
+    *,
+    rating_groups: tuple[int, ...] = (),
+    speeds: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    explorer_cache, metadata = collect_lichess_evidence(
+        records,
+        rating_groups=rating_groups,
+        speeds=speeds,
+    )
+    attach_lichess_evidence(
+        records,
+        warnings,
+        explorer_cache,
+        rating_groups=rating_groups,
+        speeds=speeds,
+    )
+    return metadata
+
+
 def add_motif_evidence(records: list[dict[str, Any]], warnings: list[str]) -> None:
     previous_eval_cp: int | None = None
     motif_failures = 0
@@ -754,7 +902,7 @@ def add_motif_evidence(records: list[dict[str, Any]], warnings: list[str]) -> No
             ),
         }
         try:
-            record["motifs"] = detect_motifs(
+            candidates = detect_motifs(
                 board=current_board,
                 prev_board=previous_board,
                 move_number=record["ply"],
@@ -763,11 +911,28 @@ def add_motif_evidence(records: list[dict[str, Any]], warnings: list[str]) -> No
                 sf_raw=sf_raw,
                 last_move_uci=record["played_move"]["uci"],
                 prev_move_uci=record["previous_move_uci"],
+                include_experimental=True,
+            )
+            record["motifs"] = publish_motifs(candidates)
+            publishable_candidates = [
+                motif
+                for motif in candidates
+                if motif.get("confidence") != "experimental"
+            ]
+            record["motif_candidates_suppressed"] = sum(
+                motif.get("confidence") == "experimental"
+                for motif in candidates
+            )
+            record["motif_candidates_omitted_for_limit"] = max(
+                0,
+                len(publishable_candidates) - len(record["motifs"]),
             )
             record["motifs_available"] = True
         except Exception:
             motif_failures += 1
             record["motifs"] = []
+            record["motif_candidates_suppressed"] = 0
+            record["motif_candidates_omitted_for_limit"] = 0
             record["motifs_available"] = False
         if evaluation["type"] == "cp":
             previous_eval_cp = evaluation["value"]
@@ -808,22 +973,43 @@ def build_analysis(
     pgn_bytes: bytes,
     *,
     max_plies: int = 20,
-    stockfish_depth: int = 18,
+    stockfish_depth: int = 24,
+    stockfish_max_seconds: float | None = 1.25,
+    stockfish_multipv: int = 1,
+    stockfish_threads: int = 1,
+    stockfish_hash_mb: int = 64,
     lichess_ratings: tuple[int, ...] | list[int] | None = None,
     lichess_speeds: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
+    analysis_started = time.perf_counter()
     game, _raw_text, warnings = _parse_game(pgn_bytes)
     positions, total_plies = _position_records(game, max_plies=max_plies)
     rating_groups = normalize_rating_groups(lichess_ratings)
     speeds = normalize_speeds(lichess_speeds)
 
-    initial_stockfish = evaluate_with_stockfish(
-        positions,
-        depth=stockfish_depth,
-    )
-    add_lichess_evidence(
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        stockfish_future = executor.submit(
+            evaluate_with_stockfish,
+            positions,
+            depth=stockfish_depth,
+            max_seconds=stockfish_max_seconds,
+            multipv=stockfish_multipv,
+            threads=stockfish_threads,
+            hash_mb=stockfish_hash_mb,
+        )
+        lichess_future = executor.submit(
+            collect_lichess_evidence,
+            positions,
+            rating_groups=rating_groups,
+            speeds=speeds,
+        )
+        initial_stockfish, stockfish_provider = stockfish_future.result()
+        explorer_cache, lichess_metadata = lichess_future.result()
+
+    attach_lichess_evidence(
         positions,
         warnings,
+        explorer_cache,
         rating_groups=rating_groups,
         speeds=speeds,
     )
@@ -842,9 +1028,10 @@ def build_analysis(
         )
 
     providers = {
-        "stockfish": {"available": True, "depth": stockfish_depth},
+        "stockfish": stockfish_provider,
         "lichess": {
             **lichess_status(),
+            **lichess_metadata,
             "available": any(
                 position["lichess"]["masters"]["available"]
                 or position["lichess"]["players"]["available"]
@@ -858,11 +1045,17 @@ def build_analysis(
         "motifs": {
             "available": any(
                 position.get("motifs_available", False) for position in positions
-            )
+            ),
+            "published_confidence_levels": ["high", "medium"],
+            "published_detector_ids": sorted(MOTIF_CONFIDENCE),
+            "suppressed_experimental_candidates": sum(
+                position.get("motif_candidates_suppressed", 0)
+                for position in positions
+            ),
         },
     }
     result: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "metadata": metadata,
         "filters": {
             "lichess_rating_groups": list(rating_groups),
@@ -874,6 +1067,9 @@ def build_analysis(
         "analyzed_plies": analyzed_plies,
         "truncated": truncated,
         "warnings": list(dict.fromkeys(warnings)),
+        "analysis_wall_time_ms": round(
+            (time.perf_counter() - analysis_started) * 1000
+        ),
         "providers": providers,
         "positions": positions,
     }

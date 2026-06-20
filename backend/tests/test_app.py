@@ -86,6 +86,8 @@ class AppTests(unittest.TestCase):
             analyze.call_args.kwargs["lichess_ratings"],
             (1600,),
         )
+        self.assertEqual(analyze.call_args.kwargs["stockfish_multipv"], 1)
+        self.assertEqual(analyze.call_args.kwargs["stockfish_hash_mb"], 64)
         explain.assert_not_called()
 
     def test_oversized_upload_is_rejected(self):

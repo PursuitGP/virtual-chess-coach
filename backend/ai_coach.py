@@ -8,7 +8,7 @@ import os
 from typing import Any
 
 
-PROMPT_VERSION = "2026-06-19.3"
+PROMPT_VERSION = "2026-06-19.4"
 DEFAULT_MODEL = "gemini-3.5-flash"
 VALID_PERSPECTIVES = {"white", "black", "both"}
 class AIConfigurationError(Exception):
@@ -149,7 +149,10 @@ Rules:
 5. Mention a variation only when it appears in a supplied
    stockfish.top_lines sequence. Prefer moves_san for human-readable notation
    and use moves_uci only for exact alignment.
-6. Treat motif findings as heuristic context, not infallible truth.
+6. Treat motif findings as heuristic context, not infallible truth. A "high"
+   confidence motif has a literal board-state definition. A "medium" confidence
+   motif is useful context but must be phrased cautiously and corroborated with
+   Stockfish where it affects move quality.
 7. Distinguish engine-backed conclusions from coaching interpretation.
 8. Explain evaluation changes naturally, but numeric values may be used when
    they improve clarity.

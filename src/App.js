@@ -669,13 +669,28 @@ export default function App() {
                     <ul className="motif-list">
                       {currentRecord.motifs.map((motif, index) => (
                         <li key={`${motif.id}-${index}`}>
-                          <strong>{motif.name}</strong>
+                          <strong>
+                            {motif.name}
+                            {motif.confidence && (
+                              <small>{motif.confidence} confidence</small>
+                            )}
+                          </strong>
                           <span>{motif.explanation}</span>
                         </li>
                       ))}
                     </ul>
                   ) : (
                     <p className="muted">No motif fired for this position.</p>
+                  )}
+                  {currentRecord.motif_candidates_suppressed > 0 && (
+                    <p className="muted motif-suppressed">
+                      {currentRecord.motif_candidates_suppressed} experimental
+                      detector candidate
+                      {currentRecord.motif_candidates_suppressed === 1
+                        ? ""
+                        : "s"}{" "}
+                      withheld pending validation.
+                    </p>
                   )}
                 </div>
               </div>

@@ -20,8 +20,13 @@ class FakeStockfish:
     def __init__(self):
         self.fen = None
         self.calls = 0
+        self.id = {"name": "Stockfish Test"}
+        self.options = {}
 
-    def analyse(self, board, _limit, multipv):
+    def configure(self, options):
+        self.options.update(options)
+
+    def analyse(self, board, _limit, multipv, **_kwargs):
         self.calls += 1
         moves = list(board.legal_moves)[:multipv]
         if not moves:
@@ -32,6 +37,10 @@ class FakeStockfish:
                         chess.WHITE,
                     ),
                     "pv": [],
+                    "depth": 14,
+                    "seldepth": 18,
+                    "nodes": 1000,
+                    "time": 0.01,
                 }
             ]
         return [
@@ -41,6 +50,10 @@ class FakeStockfish:
                     chess.WHITE,
                 ),
                 "pv": [move],
+                "depth": 14,
+                "seldepth": 18,
+                "nodes": 1000,
+                "time": 0.01,
             }
             for rank, move in enumerate(moves)
         ]
@@ -142,6 +155,8 @@ class AnalysisTests(unittest.TestCase):
             },
         )
         self.assertTrue(first["stockfish"]["top_lines"])
+        self.assertEqual(result["providers"]["stockfish"]["engine"], "Stockfish Test")
+        self.assertEqual(result["providers"]["stockfish"]["achieved_depth"]["minimum"], 14)
 
     def test_rating_filter_and_outcome_context_are_preserved(self):
         calls = []
@@ -254,9 +269,10 @@ class AnalysisTests(unittest.TestCase):
                 analysis,
                 "fetch_lichess_explorer",
                 side_effect=requests.Timeout(),
-            ),
+            ) as fetch,
         ):
             result = analysis.build_analysis(b"1. e4 e5 *")
+        self.assertEqual(fetch.call_count, 2)
         self.assertTrue(result["providers"]["stockfish"]["available"])
         self.assertFalse(result["providers"]["lichess"]["available"])
         self.assertTrue(any("Lichess" in warning for warning in result["warnings"]))

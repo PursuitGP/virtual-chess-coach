@@ -355,13 +355,33 @@ label {
 }
 
 .motif-list strong {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
   font-size: 0.82rem;
+}
+
+.motif-list strong small {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.58rem;
+  font-weight: 600;
+  padding: 0.15rem 0.35rem;
+  text-transform: uppercase;
 }
 
 .motif-list span {
   color: var(--muted);
   font-size: 0.78rem;
   line-height: 1.45;
+}
+
+.motif-suppressed {
+  border-top: 1px solid var(--line);
+  margin: 0.7rem 0 0;
+  padding-top: 0.6rem;
 }
 
 .coach-panel {

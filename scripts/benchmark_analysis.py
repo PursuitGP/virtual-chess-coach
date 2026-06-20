@@ -24,7 +24,7 @@ from backend import analysis  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--depth", type=int, default=14)
+    parser.add_argument("--depth", type=int, default=24)
     parser.add_argument("--plies", type=int, default=20)
     parser.add_argument(
         "--offline",
@@ -60,9 +60,13 @@ def main() -> int:
                     stockfish_depth=args.depth,
                 )
             elapsed = time.monotonic() - started
+            stockfish = result["providers"]["stockfish"]
+            achieved = stockfish.get("achieved_depth") or {}
             print(
                 f"{path.name:28} {elapsed:6.2f}s "
                 f"{result['analyzed_plies']:2}/{result['total_plies']:2} plies "
+                f"engine={stockfish.get('engine')} "
+                f"median_depth={achieved.get('median')} "
                 f"warnings={len(result['warnings'])}"
             )
         except Exception as exc:
