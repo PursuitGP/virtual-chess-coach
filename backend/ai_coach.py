@@ -8,7 +8,7 @@ import os
 from typing import Any
 
 
-PROMPT_VERSION = "2026-06-19.1"
+PROMPT_VERSION = "2026-06-19.3"
 DEFAULT_MODEL = "gemini-3.5-flash"
 VALID_PERSPECTIVES = {"white", "black", "both"}
 class AIConfigurationError(Exception):
@@ -51,9 +51,43 @@ def gemini_status() -> dict[str, Any]:
     return {
         "configured": configured,
         "sdk_available": sdk_available,
+        "ready": configured and sdk_available,
         "available": configured and sdk_available,
+        "verified": False,
         "model": _model_name(),
     }
+
+
+def verify_gemini_connection() -> dict[str, Any]:
+    status = gemini_status()
+    if not status["ready"]:
+        return {
+            **status,
+            "verified": False,
+            "error": "Gemini is not fully configured.",
+        }
+
+    genai = _load_genai()
+    try:
+        client = genai.Client(api_key=_api_key())
+        response = client.models.generate_content(
+            model=_model_name(),
+            contents='Return only this JSON object: {"ok": true}',
+            config={"response_mime_type": "application/json"},
+        )
+        payload = json.loads(_extract_json_text(response))
+        verified = payload.get("ok") is True
+        return {
+            **status,
+            "verified": verified,
+            "error": None if verified else "Gemini returned an unexpected response.",
+        }
+    except Exception as exc:
+        return {
+            **status,
+            "verified": False,
+            "error": _safe_provider_error(exc),
+        }
 
 
 def _condense_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
@@ -70,6 +104,7 @@ def _condense_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
                 "lichess": position.get("lichess"),
                 "motifs": position.get("motifs"),
                 "motifs_available": position.get("motifs_available"),
+                "available_evidence_refs": sorted(_allowed_refs(position)),
             }
         )
     return {
@@ -111,16 +146,31 @@ Rules:
 3. Copy ply, move, and side exactly from the evidence package.
 4. Never invent moves, variations, probabilities, opening names, evaluations,
    or tactical claims.
-5. Mention a variation only when it appears in stockfish.pv.
+5. Mention a variation only when it appears in a supplied
+   stockfish.top_lines sequence. Prefer moves_san for human-readable notation
+   and use moves_uci only for exact alignment.
 6. Treat motif findings as heuristic context, not infallible truth.
 7. Distinguish engine-backed conclusions from coaching interpretation.
 8. Explain evaluation changes naturally, but numeric values may be used when
    they improve clarity.
 9. Avoid generic advice that is not tied to this position.
-10. Every evidence_refs item must identify evidence actually used. Allowed
-    forms are stockfish.*, lichess.*, or motifs.<motif id>.
+10. Every evidence_refs item must identify evidence actually used. For each
+    ply, copy references only from that position's available_evidence_refs
+    list. Never cite a field merely because it exists on another ply.
 11. If Lichess or motif evidence is unavailable, rely on the available
     Stockfish evidence and say nothing about the missing source.
+12. Lichess statistics describe human results, not objective move quality.
+    Never call a move objectively best because it has a high win rate.
+13. Reward a master-aligned move only when the Stockfish evidence also says it
+    is sound. A common rating-pool mistake may be reassuringly described as
+    understandable, but it must still be corrected clearly.
+14. "sound-novelty-candidate" means absent from the selected sample while
+    remaining engine-sound. Never claim historical novelty.
+15. Practical continuation recommendations must come from
+    lichess.practical_candidates, where Stockfish lines are already joined to
+    master and selected-rating statistics.
+16. Use opening_context only when a project-curated description is present.
+    Do not browse the internet or invent historical opening background.
 
 Perspective: {perspective}
 Prompt version: {PROMPT_VERSION}
@@ -143,14 +193,21 @@ def _allowed_refs(position: dict[str, Any]) -> set[str]:
         refs.add("stockfish.eval_delta")
     if stockfish.get("best_move"):
         refs.add("stockfish.best_move")
-    if stockfish.get("pv"):
-        refs.add("stockfish.pv")
+    if stockfish.get("top_lines"):
+        refs.add("stockfish.top_lines")
 
     lichess = position.get("lichess") or {}
     if lichess.get("opening"):
         refs.add("lichess.opening")
+    opening_context = lichess.get("opening_context") or {}
+    if opening_context.get("description"):
+        refs.add("lichess.opening_context")
     if lichess.get("theory_status"):
         refs.add("lichess.theory_status")
+    if lichess.get("practical_signal"):
+        refs.add("lichess.practical_signal")
+    if lichess.get("practical_candidates"):
+        refs.add("lichess.practical_candidates")
     for database in ("masters", "players"):
         evidence = lichess.get(database) or {}
         if evidence.get("played_move"):
@@ -272,7 +329,7 @@ def generate_explanations(
         raise
     except Exception as exc:
         raise AIProviderError(
-            "Gemini could not generate coaching. Your analysis is preserved; please retry."
+            f"{_safe_provider_error(exc)} Your analysis is preserved; please retry."
         ) from exc
 
     text = _extract_json_text(response)
@@ -291,3 +348,14 @@ def generate_explanations(
         "prompt_version": PROMPT_VERSION,
         "explanations": explanations,
     }
+
+
+def _safe_provider_error(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "api key" in text or "unauthenticated" in text or "permission" in text:
+        return "Gemini rejected the configured API key."
+    if "quota" in text or "resource_exhausted" in text or "429" in text:
+        return "Gemini quota or rate limits were exceeded."
+    if "model" in text and ("not found" in text or "404" in text):
+        return f"Gemini model {_model_name()} is unavailable for this project."
+    return "Gemini could not generate coaching."

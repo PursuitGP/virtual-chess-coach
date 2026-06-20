@@ -7,25 +7,52 @@ import io
 import json
 import os
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 from functools import lru_cache
 from typing import Any
 
 import chess
+import chess.engine
 import chess.pgn
 import requests
-from stockfish import Stockfish
 
 try:
     from .motifs import detect_motifs
+    from .opening_context import context_for_opening
 except ImportError:
     from motifs import detect_motifs
+    from opening_context import context_for_opening
 
 
-LICHESS_EXPLORER_URL = "https://explorer.lichess.ovh"
+LICHESS_EXPLORER_URL = os.getenv(
+    "LICHESS_EXPLORER_URL",
+    "https://explorer.lichess.org",
+).rstrip("/")
 LICHESS_TIMEOUT_SECONDS = float(os.getenv("LICHESS_TIMEOUT_SECONDS", "5"))
-LICHESS_MOVE_LIMIT = int(os.getenv("LICHESS_MOVE_LIMIT", "8"))
+LICHESS_MOVE_LIMIT = int(os.getenv("LICHESS_MOVE_LIMIT", "10"))
 MIN_MASTER_GAMES = int(os.getenv("MIN_MASTER_GAMES", "20"))
+SOUND_MOVE_LOSS_CP = int(os.getenv("SOUND_MOVE_LOSS_CP", "40"))
+MISTAKE_MOVE_LOSS_CP = int(os.getenv("MISTAKE_MOVE_LOSS_CP", "100"))
+COMMON_PLAYER_MOVE_PCT = float(os.getenv("COMMON_PLAYER_MOVE_PCT", "5"))
+ALLOWED_RATING_GROUPS = {
+    0,
+    1000,
+    1200,
+    1400,
+    1600,
+    1800,
+    2000,
+    2200,
+    2500,
+}
+ALLOWED_SPEEDS = {
+    "ultraBullet",
+    "bullet",
+    "blitz",
+    "rapid",
+    "classical",
+    "correspondence",
+}
 
 _session = requests.Session()
 _session.headers.update(
@@ -67,7 +94,7 @@ def find_stockfish_path() -> str | None:
     return None
 
 
-def create_stockfish(depth: int) -> Stockfish:
+def create_stockfish():
     path = find_stockfish_path()
     if not path:
         raise AnalysisError(
@@ -76,7 +103,7 @@ def create_stockfish(depth: int) -> Stockfish:
             status_code=503,
             retryable=False,
         )
-    return Stockfish(path=path, depth=depth)
+    return chess.engine.SimpleEngine.popen_uci(path)
 
 
 def _decode_pgn(pgn_bytes: bytes) -> str:
@@ -142,25 +169,26 @@ def _position_records(
     return records, len(all_moves)
 
 
-def _normalize_evaluation(raw: dict[str, Any]) -> dict[str, Any]:
-    evaluation_type = raw.get("type")
-    value = raw.get("value")
-    if evaluation_type == "cp" and isinstance(value, (int, float)):
+def _normalize_engine_score(score: chess.engine.PovScore) -> dict[str, Any]:
+    white_score = score.white()
+    mate = white_score.mate()
+    if mate is not None:
+        display = f"{'-' if mate < 0 else ''}M{abs(mate)}"
+        return {
+            "type": "mate",
+            "value": int(mate),
+            "pawns": None,
+            "display": display,
+        }
+
+    value = white_score.score()
+    if isinstance(value, int):
         pawns = value / 100.0
         return {
             "type": "cp",
             "value": int(value),
             "pawns": round(pawns, 2),
             "display": f"{pawns:+.2f}",
-        }
-    if evaluation_type == "mate" and isinstance(value, (int, float)):
-        value = int(value)
-        display = f"{'-' if value < 0 else ''}M{abs(value)}"
-        return {
-            "type": "mate",
-            "value": value,
-            "pawns": None,
-            "display": display,
         }
     raise AnalysisError(
         "Stockfish returned an unsupported evaluation.",
@@ -174,63 +202,235 @@ def evaluate_with_stockfish(
     records: list[dict[str, Any]],
     *,
     depth: int,
-) -> None:
-    engine = create_stockfish(depth)
-    previous_cp: int | None = None
+) -> dict[str, Any]:
+    engine = create_stockfish()
 
-    for record in records:
+    def evaluate_position(fen: str) -> dict[str, Any]:
+        board = chess.Board(fen)
         try:
-            engine.set_fen_position(record["fen"])
-            raw = engine.get_evaluation()
-            top_moves = engine.get_top_moves(3) or []
-            best_move = engine.get_best_move()
+            infos = engine.analyse(
+                board,
+                chess.engine.Limit(depth=depth),
+                multipv=3,
+            )
         except Exception as exc:
             raise AnalysisError(
-                "Stockfish could not evaluate the uploaded game.",
+                "Stockfish could not evaluate a position in the uploaded game.",
                 code="stockfish_failed",
                 status_code=502,
                 retryable=True,
             ) from exc
 
-        evaluation = _normalize_evaluation(raw)
-        current_cp = evaluation["value"] if evaluation["type"] == "cp" else None
-        delta_cp = (
-            current_cp - previous_cp
-            if current_cp is not None and previous_cp is not None
-            else None
-        )
-        record["stockfish"] = {
+        if isinstance(infos, dict):
+            infos = [infos]
+        top_lines = []
+        for rank, info in enumerate(infos, start=1):
+            if "score" not in info:
+                continue
+            pv = info.get("pv") or []
+            line_board = board.copy()
+            moves_san = []
+            for move in pv[:8]:
+                try:
+                    moves_san.append(line_board.san(move))
+                    line_board.push(move)
+                except (AssertionError, ValueError):
+                    break
+            top_lines.append(
+                {
+                    "rank": rank,
+                    "evaluation": _normalize_engine_score(info["score"]),
+                    "moves_uci": [move.uci() for move in pv[:8]],
+                    "moves_san": moves_san,
+                }
+            )
+        if not top_lines:
+            raise AnalysisError(
+                "Stockfish did not return an analysis line.",
+                code="stockfish_invalid_response",
+                status_code=502,
+                retryable=True,
+            )
+        return {
             "depth": depth,
-            "evaluation": evaluation,
-            "eval_delta_cp": delta_cp,
-            "eval_delta_pawns": round(delta_cp / 100.0, 2)
-            if delta_cp is not None
-            else None,
-            "best_move": best_move,
-            "pv": [
-                move.get("Move")
-                for move in top_moves
-                if isinstance(move, dict) and move.get("Move")
-            ],
+            "evaluation": top_lines[0]["evaluation"],
+            "best_move": (
+                top_lines[0]["moves_uci"][0]
+                if top_lines[0]["moves_uci"]
+                else None
+            ),
+            "top_lines": top_lines,
         }
-        if current_cp is not None:
-            previous_cp = current_cp
+
+    try:
+        initial = evaluate_position(records[0]["previous_fen"])
+        previous_eval = initial["evaluation"]
+
+        for record in records:
+            stockfish = evaluate_position(record["fen"])
+            current_eval = stockfish["evaluation"]
+            previous_cp = (
+                previous_eval["value"]
+                if previous_eval["type"] == "cp"
+                else None
+            )
+            current_cp = (
+                current_eval["value"]
+                if current_eval["type"] == "cp"
+                else None
+            )
+            delta_cp = (
+                current_cp - previous_cp
+                if current_cp is not None and previous_cp is not None
+                else None
+            )
+            mover_loss_cp = None
+            if delta_cp is not None:
+                mover_loss_cp = max(
+                    0,
+                    -delta_cp if record["side"] == "white" else delta_cp,
+                )
+            stockfish.update(
+                {
+                    "eval_delta_cp": delta_cp,
+                    "eval_delta_pawns": round(delta_cp / 100.0, 2)
+                    if delta_cp is not None
+                    else None,
+                    "mover_loss_cp": mover_loss_cp,
+                    "mover_loss_pawns": round(mover_loss_cp / 100.0, 2)
+                    if mover_loss_cp is not None
+                    else None,
+                }
+            )
+            record["stockfish"] = stockfish
+            previous_eval = current_eval
+        return initial
+    finally:
+        try:
+            engine.quit()
+        except Exception:
+            pass
+
+
+def _lichess_headers() -> dict[str, str]:
+    headers = dict(_session.headers)
+    token = os.getenv("LICHESS_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def lichess_status() -> dict[str, Any]:
+    return {
+        "configured": bool(os.getenv("LICHESS_TOKEN", "").strip()),
+        "endpoint": LICHESS_EXPLORER_URL,
+        "rating_groups": sorted(ALLOWED_RATING_GROUPS),
+    }
+
+
+def verify_lichess_connection() -> dict[str, Any]:
+    status = lichess_status()
+    if not status["configured"]:
+        return {
+            **status,
+            "verified": False,
+            "error": "LICHESS_TOKEN is not configured.",
+        }
+    try:
+        starting_fen = chess.Board().fen()
+        masters = fetch_lichess_explorer(starting_fen, "masters")
+        players = fetch_lichess_explorer(starting_fen, "lichess")
+        return {
+            **status,
+            "verified": True,
+            "error": None,
+            "masters_games": _games_count(masters),
+            "player_games": _games_count(players),
+        }
+    except requests.HTTPError as exc:
+        code = exc.response.status_code if exc.response is not None else None
+        message = (
+            "Lichess rejected LICHESS_TOKEN."
+            if code == 401
+            else f"Lichess returned HTTP {code or 'error'}."
+        )
+        return {
+            **status,
+            "verified": False,
+            "error": message,
+        }
+    except requests.RequestException:
+        return {
+            **status,
+            "verified": False,
+            "error": "Lichess Opening Explorer could not be reached.",
+        }
+
+
+def normalize_rating_groups(
+    rating_groups: tuple[int, ...] | list[int] | None,
+) -> tuple[int, ...]:
+    if not rating_groups:
+        return ()
+    normalized = tuple(sorted({int(value) for value in rating_groups}))
+    if any(value not in ALLOWED_RATING_GROUPS for value in normalized):
+        raise AnalysisError(
+            "Unsupported Lichess rating group.",
+            code="invalid_lichess_rating",
+        )
+    return normalized
+
+
+def normalize_speeds(
+    speeds: tuple[str, ...] | list[str] | None,
+) -> tuple[str, ...]:
+    if not speeds:
+        return ()
+    normalized = tuple(dict.fromkeys(str(value) for value in speeds))
+    if any(value not in ALLOWED_SPEEDS for value in normalized):
+        raise AnalysisError(
+            "Unsupported Lichess speed filter.",
+            code="invalid_lichess_speed",
+        )
+    return normalized
 
 
 @lru_cache(maxsize=4096)
-def fetch_lichess_explorer(fen: str, database: str) -> dict[str, Any]:
+def fetch_lichess_explorer(
+    fen: str,
+    database: str,
+    rating_groups: tuple[int, ...] = (),
+    speeds: tuple[str, ...] = (),
+) -> dict[str, Any]:
     if database not in {"masters", "lichess"}:
         raise ValueError(f"Unsupported Lichess database: {database}")
+    params: dict[str, Any] = {
+        "fen": fen,
+        "moves": LICHESS_MOVE_LIMIT,
+        "topGames": 0,
+    }
+    if database == "lichess":
+        params["recentGames"] = 0
+        if rating_groups:
+            params["ratings"] = ",".join(str(value) for value in rating_groups)
+        if speeds:
+            params["speeds"] = ",".join(speeds)
+
     response = _session.get(
         f"{LICHESS_EXPLORER_URL}/{database}",
-        params={
-            "fen": fen,
-            "moves": LICHESS_MOVE_LIMIT,
-            "topGames": 0,
-            "recentGames": 0,
-        },
+        params=params,
+        headers=_lichess_headers(),
         timeout=LICHESS_TIMEOUT_SECONDS,
     )
+    if response.status_code == 429:
+        retry_after = min(int(response.headers.get("Retry-After", "1")), 5)
+        time.sleep(max(retry_after, 1))
+        response = _session.get(
+            f"{LICHESS_EXPLORER_URL}/{database}",
+            params=params,
+            headers=_lichess_headers(),
+            timeout=LICHESS_TIMEOUT_SECONDS,
+        )
     response.raise_for_status()
     data = response.json()
     return data if isinstance(data, dict) else {}
@@ -240,26 +440,49 @@ def _games_count(data: dict[str, Any]) -> int:
     return sum(int(data.get(key, 0) or 0) for key in ("white", "draws", "black"))
 
 
-def _move_summary(move: dict[str, Any], total_games: int, rank: int) -> dict[str, Any]:
+def _move_summary(
+    move: dict[str, Any],
+    total_games: int,
+    rank: int,
+    side_to_move: str,
+) -> dict[str, Any]:
     played = _games_count(move)
     denominator = total_games or 1
+    white_win_pct = round(
+        (int(move.get("white", 0) or 0) / (played or 1)) * 100,
+        2,
+    )
+    draw_pct = round(
+        (int(move.get("draws", 0) or 0) / (played or 1)) * 100,
+        2,
+    )
+    black_win_pct = round(
+        (int(move.get("black", 0) or 0) / (played or 1)) * 100,
+        2,
+    )
+    mover_win_pct = white_win_pct if side_to_move == "white" else black_win_pct
+    mover_loss_pct = black_win_pct if side_to_move == "white" else white_win_pct
     return {
         "rank": rank,
         "uci": move.get("uci"),
         "san": move.get("san"),
         "games": played,
         "popularity_pct": round((played / denominator) * 100, 2),
-        "white_win_pct": round((int(move.get("white", 0) or 0) / (played or 1)) * 100, 2),
-        "draw_pct": round((int(move.get("draws", 0) or 0) / (played or 1)) * 100, 2),
-        "black_win_pct": round((int(move.get("black", 0) or 0) / (played or 1)) * 100, 2),
+        "white_win_pct": white_win_pct,
+        "draw_pct": draw_pct,
+        "black_win_pct": black_win_pct,
+        "mover_win_pct": mover_win_pct,
+        "mover_loss_pct": mover_loss_pct,
+        "mover_score_pct": round(mover_win_pct + draw_pct / 2, 2),
         "average_rating": move.get("averageRating"),
     }
 
 
-def summarize_explorer(data: dict[str, Any]) -> dict[str, Any]:
+def summarize_explorer(data: dict[str, Any], fen: str) -> dict[str, Any]:
     total_games = _games_count(data)
+    side_to_move = "white" if chess.Board(fen).turn == chess.WHITE else "black"
     moves = [
-        _move_summary(move, total_games, rank)
+        _move_summary(move, total_games, rank, side_to_move)
         for rank, move in enumerate(data.get("moves") or [], start=1)
         if isinstance(move, dict)
     ]
@@ -267,6 +490,7 @@ def summarize_explorer(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "available": True,
         "total_games": total_games,
+        "side_to_move": side_to_move,
         "opening": {
             "eco": opening.get("eco"),
             "name": opening.get("name"),
@@ -309,7 +533,117 @@ def _theory_status(
     return "rare-master-move"
 
 
-def add_lichess_evidence(records: list[dict[str, Any]], warnings: list[str]) -> None:
+def _practical_signal(
+    record: dict[str, Any],
+    masters_before: dict[str, Any],
+    players_before: dict[str, Any],
+    master_move: dict[str, Any] | None,
+    player_move: dict[str, Any] | None,
+) -> dict[str, Any]:
+    loss_cp = record["stockfish"].get("mover_loss_cp")
+    sound = loss_cp is not None and loss_cp <= SOUND_MOVE_LOSS_CP
+    mistake = loss_cp is not None and loss_cp >= MISTAKE_MOVE_LOSS_CP
+    master_rank = master_move.get("rank") if master_move else None
+    player_popularity = (
+        player_move.get("popularity_pct") if player_move else 0
+    )
+
+    if not masters_before.get("available"):
+        classification = "statistics-unavailable"
+    elif masters_before.get("total_games", 0) < MIN_MASTER_GAMES:
+        classification = "insufficient-master-sample"
+    elif master_rank and master_rank <= 3 and sound:
+        classification = "master-aligned-and-sound"
+    elif master_move is None and sound:
+        classification = "sound-novelty-candidate"
+    elif master_rank and master_rank > 3 and sound:
+        classification = "sound-rare-master-alternative"
+    elif (
+        mistake
+        and players_before.get("available")
+        and player_popularity >= COMMON_PLAYER_MOVE_PCT
+    ):
+        classification = "common-rating-pool-mistake"
+    elif mistake:
+        classification = "engine-identified-mistake"
+    elif (
+        players_before.get("available")
+        and player_popularity >= COMMON_PLAYER_MOVE_PCT
+    ):
+        classification = "common-rating-pool-choice"
+    else:
+        classification = "unclear-or-low-sample"
+
+    return {
+        "classification": classification,
+        "engine_sound": sound,
+        "engine_mistake": mistake,
+        "mover_loss_cp": loss_cp,
+        "master_rank": master_rank,
+        "player_popularity_pct": player_popularity,
+        "note": (
+            "Novelty labels are candidates only: absence from the selected "
+            "Lichess sample does not prove a move is historically new."
+        ),
+    }
+
+
+def _practical_candidates(
+    record: dict[str, Any],
+    masters_after: dict[str, Any],
+    players_after: dict[str, Any],
+) -> list[dict[str, Any]]:
+    master_by_uci = {
+        move.get("uci"): move for move in masters_after.get("moves", [])
+    }
+    player_by_uci = {
+        move.get("uci"): move for move in players_after.get("moves", [])
+    }
+    candidates = []
+    for line in record["stockfish"].get("top_lines", []):
+        moves = line.get("moves_uci") or []
+        if not moves:
+            continue
+        uci = moves[0]
+        master = master_by_uci.get(uci)
+        player = player_by_uci.get(uci)
+        master_popularity = master.get("popularity_pct", 0) if master else 0
+        player_popularity = player.get("popularity_pct", 0) if player else 0
+        if not (
+            masters_after.get("available")
+            or players_after.get("available")
+        ):
+            label = "engine-top-line-statistics-unavailable"
+        elif line["rank"] == 1 and max(master_popularity, player_popularity) < 5:
+            label = "engine-first-rare-practical-option"
+        elif master and master.get("rank", 99) <= 3:
+            label = "engine-and-master-supported"
+        elif player and player.get("popularity_pct", 0) >= 5:
+            label = "engine-supported-common-player-choice"
+        else:
+            label = "engine-supported-alternative"
+        candidates.append(
+            {
+                "uci": uci,
+                "label": label,
+                "stockfish_rank": line["rank"],
+                "stockfish_evaluation": line.get("evaluation"),
+                "stockfish_line_uci": moves,
+                "stockfish_line_san": line.get("moves_san") or [],
+                "masters": master,
+                "players": player,
+            }
+        )
+    return candidates
+
+
+def add_lichess_evidence(
+    records: list[dict[str, Any]],
+    warnings: list[str],
+    *,
+    rating_groups: tuple[int, ...] = (),
+    speeds: tuple[str, ...] = (),
+) -> None:
     unique_fens = {
         fen
         for record in records
@@ -317,43 +651,32 @@ def add_lichess_evidence(records: list[dict[str, Any]], warnings: list[str]) -> 
     }
     explorer_cache: dict[tuple[str, str], dict[str, Any]] = {}
 
-    requests_to_make = [
-        (fen, database)
-        for fen in unique_fens
-        for database in ("masters", "lichess")
-    ]
-
     def load_explorer(fen: str, database: str):
         try:
-            raw = fetch_lichess_explorer(fen, database)
-            return fen, database, summarize_explorer(raw)
-        except (requests.RequestException, ValueError):
-            return (
+            raw = fetch_lichess_explorer(
                 fen,
                 database,
-                _unavailable_explorer(
-                    "Lichess Opening Explorer was unavailable."
-                ),
+                rating_groups if database == "lichess" else (),
+                speeds if database == "lichess" else (),
+            )
+            return summarize_explorer(raw, fen)
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 401:
+                reason = (
+                    "Lichess Opening Explorer requires a valid LICHESS_TOKEN."
+                )
+            else:
+                reason = "Lichess Opening Explorer was unavailable."
+            return _unavailable_explorer(reason)
+        except (requests.RequestException, ValueError):
+            return _unavailable_explorer(
+                "Lichess Opening Explorer was unavailable."
             )
 
-    with ThreadPoolExecutor(
-        max_workers=min(6, len(requests_to_make))
-    ) as executor:
-        futures = {
-            executor.submit(load_explorer, fen, database): (fen, database)
-            for fen, database in requests_to_make
-        }
-        for future in as_completed(futures):
-            try:
-                fen, database, summary = future.result()
-                explorer_cache[(fen, database)] = summary
-            except Exception:
-                # The worker already converts expected provider failures. This
-                # branch is a final guard that preserves the rest of analysis.
-                fen, database = futures[future]
-                explorer_cache[(fen, database)] = _unavailable_explorer(
-                    "Lichess Opening Explorer was unavailable."
-                )
+    # Lichess explicitly asks API clients to make one request at a time.
+    for fen in sorted(unique_fens):
+        for database in ("masters", "lichess"):
+            explorer_cache[(fen, database)] = load_explorer(fen, database)
 
     if any(
         not value.get("available") for value in explorer_cache.values()
@@ -371,21 +694,43 @@ def add_lichess_evidence(records: list[dict[str, Any]], warnings: list[str]) -> 
         played_masters = _played_move(before_masters, uci)
         played_players = _played_move(before_players, uci)
         opening = after_masters.get("opening") or after_players.get("opening")
+        opening_context = context_for_opening(opening)
+        practical_signal = _practical_signal(
+            record,
+            before_masters,
+            before_players,
+            played_masters,
+            played_players,
+        )
+        practical_candidates = _practical_candidates(
+            record,
+            after_masters,
+            after_players,
+        )
 
         record["lichess"] = {
             "opening": opening,
+            "opening_context": opening_context,
             "theory_status": _theory_status(before_masters, played_masters),
+            "filters": {
+                "rating_groups": list(rating_groups),
+                "speeds": list(speeds),
+            },
+            "practical_signal": practical_signal,
+            "practical_candidates": practical_candidates,
             "masters": {
                 "available": before_masters.get("available", False),
+                "unavailable_reason": before_masters.get("reason"),
                 "position_games_before": before_masters.get("total_games", 0),
                 "played_move": played_masters,
-                "continuations": after_masters.get("moves", [])[:3],
+                "continuations": after_masters.get("moves", [])[:5],
             },
             "players": {
                 "available": before_players.get("available", False),
+                "unavailable_reason": before_players.get("reason"),
                 "position_games_before": before_players.get("total_games", 0),
                 "played_move": played_players,
-                "continuations": after_players.get("moves", [])[:3],
+                "continuations": after_players.get("moves", [])[:5],
             },
         }
 
@@ -402,7 +747,11 @@ def add_motif_evidence(records: list[dict[str, Any]], warnings: list[str]) -> No
         sf_raw = {
             "type": evaluation["type"],
             "value": evaluation["value"],
-            "pv": record["stockfish"]["pv"],
+            "pv": (
+                record["stockfish"]["top_lines"][0]["moves_uci"]
+                if record["stockfish"].get("top_lines")
+                else []
+            ),
         }
         try:
             record["motifs"] = detect_motifs(
@@ -460,12 +809,24 @@ def build_analysis(
     *,
     max_plies: int = 20,
     stockfish_depth: int = 18,
+    lichess_ratings: tuple[int, ...] | list[int] | None = None,
+    lichess_speeds: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     game, _raw_text, warnings = _parse_game(pgn_bytes)
     positions, total_plies = _position_records(game, max_plies=max_plies)
+    rating_groups = normalize_rating_groups(lichess_ratings)
+    speeds = normalize_speeds(lichess_speeds)
 
-    evaluate_with_stockfish(positions, depth=stockfish_depth)
-    add_lichess_evidence(positions, warnings)
+    initial_stockfish = evaluate_with_stockfish(
+        positions,
+        depth=stockfish_depth,
+    )
+    add_lichess_evidence(
+        positions,
+        warnings,
+        rating_groups=rating_groups,
+        speeds=speeds,
+    )
     add_motif_evidence(positions, warnings)
 
     metadata = {
@@ -483,11 +844,16 @@ def build_analysis(
     providers = {
         "stockfish": {"available": True, "depth": stockfish_depth},
         "lichess": {
+            **lichess_status(),
             "available": any(
                 position["lichess"]["masters"]["available"]
                 or position["lichess"]["players"]["available"]
                 for position in positions
-            )
+            ),
+            "filters": {
+                "rating_groups": list(rating_groups),
+                "speeds": list(speeds),
+            },
         },
         "motifs": {
             "available": any(
@@ -496,8 +862,13 @@ def build_analysis(
         },
     }
     result: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "metadata": metadata,
+        "filters": {
+            "lichess_rating_groups": list(rating_groups),
+            "lichess_speeds": list(speeds),
+        },
+        "initial_stockfish": initial_stockfish,
         "moves": [position["played_move"]["san"] for position in positions],
         "total_plies": total_plies,
         "analyzed_plies": analyzed_plies,

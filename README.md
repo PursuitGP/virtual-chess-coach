@@ -13,8 +13,8 @@ The project is deliberately not built around an unaided chatbot. General-purpose
 ```text
 PGN
  └─> legal moves and FEN positions
-      ├─> Stockfish evaluation, change, best move, principal variation
-      ├─> Lichess master and general-player opening statistics
+      ├─> Stockfish evaluation, change, best move, and MultiPV lines
+      ├─> Lichess master and rating-filtered player statistics
       └─> custom tactical and positional motif detection
              └─> structured evidence package
                     └─> Gemini coaching for White, Black, or both
@@ -43,12 +43,17 @@ PGN
 For each analyzed ply, the backend records:
 
 - The played move, acting side, previous FEN, and resulting FEN
-- Stockfish evaluation, change from the preceding position, best move, and top line
-- Lichess master and aggregate-player frequency and outcome statistics
-- Likely continuations and opening metadata when available
+- Stockfish evaluation, mover-specific evaluation loss, best move, and three MultiPV lines
+- Lichess master and rating-filtered aggregate-player frequency, win, draw, loss, and score statistics
+- Up to five likely continuations from each database
+- Engine-backed practical continuation candidates that join Stockfish lines to human frequency and results
+- Conservative signals such as `master-aligned-and-sound`, `common-rating-pool-mistake`, and `sound-novelty-candidate`
+- Curated opening names/ECO codes plus short project-authored context for common opening families
 - Custom positional and tactical motifs
 
-Theory classification is calculated against the position before the move was played. Duplicate Lichess position queries are cached, and one bounded Stockfish instance evaluates the game sequentially.
+Theory classification is calculated against the position before the move was played. “Novelty” is always labeled as a candidate: absence from the selected sample does not prove historical novelty. Lichess statistics are treated as descriptions of human behavior, never as objective evaluations.
+
+Duplicate Lichess position queries are cached and made sequentially in accordance with Lichess API guidance. One bounded Stockfish process produces true MultiPV lines for the initial position and every analyzed ply.
 
 ### AI coaching
 
@@ -58,6 +63,8 @@ Theory classification is calculated against the position before the move was pla
 - Every explanation identifies the Stockfish, Lichess, or motif evidence it used
 - Misaligned moves, missing plies, malformed JSON, and invented evidence references are rejected
 - Failed AI requests preserve the completed analysis and expose a retry action
+- AI generation is paused unless Stockfish, Lichess, and motif evidence are all available
+- The LLM is not allowed to browse the internet; opening context and recommendations must come from the submitted evidence
 
 There is intentionally no deterministic prose fallback. Raw engine output and statistics remain inspectable, but they are not mislabeled as completed coaching.
 
@@ -84,7 +91,7 @@ The production container serves the React build and Flask API from one origin:
 
 ```text
 Browser ──> Gunicorn / Flask ──> Stockfish process
-                         ├─────> explorer.lichess.ovh
+                         ├─────> explorer.lichess.org
                          └─────> Gemini API
 ```
 
@@ -127,13 +134,16 @@ cp backend/.env.example backend/.env
 python backend/app.py
 ```
 
-The evidence pipeline works without Gemini, but completed coaching requires:
+Completed coaching requires both provider credentials:
 
 ```dotenv
 GEMINI_API_KEY=your_api_key
+LICHESS_TOKEN=your_personal_access_token
 ```
 
-Never commit `backend/.env`. If a key has ever been exposed outside your local machine, rotate it before deployment.
+Create the Lichess token at <https://lichess.org/account/oauth/token>. The Opening Explorer endpoint currently documents OAuth without a special scope.
+
+Never commit `backend/.env`. If a credential has ever been exposed outside your local machine, rotate it before deployment.
 
 ### Frontend
 
@@ -152,6 +162,7 @@ Create React App proxies `/api` requests to `http://127.0.0.1:5000`. Set `REACT_
 docker build -t virtual-chess-coach .
 docker run --rm -p 8080:8080 \
   -e GEMINI_API_KEY="$GEMINI_API_KEY" \
+  -e LICHESS_TOKEN="$LICHESS_TOKEN" \
   virtual-chess-coach
 ```
 
@@ -165,7 +176,13 @@ Reports Stockfish and Gemini availability plus public analysis limits. It does n
 
 ### `POST /api/analyze`
 
-Accepts multipart form data with a `file` field. It returns metadata, provider status, warnings, truncation information, and the complete per-ply evidence package. It never invokes Gemini.
+Accepts multipart form data with:
+
+- `file`: required PGN
+- `rating_group`: optional Lichess rating bucket (`0`, `1000`, `1200`, …, `2500`)
+- `speeds`: optional comma-separated Lichess speed filters
+
+It returns metadata, filters, provider status, warnings, truncation information, the initial Stockfish analysis, and the complete per-ply evidence package. It never invokes Gemini.
 
 ### `POST /api/explain`
 
@@ -181,7 +198,7 @@ Accepts:
 }
 ```
 
-`perspective` must be `white`, `black`, or `both`. Successful output is validated against the submitted analysis before it reaches the UI.
+`perspective` must be `white`, `black`, or `both`. Successful output is validated against the submitted analysis before it reaches the UI. Requests with incomplete Stockfish, Lichess, or motif evidence are rejected instead of asking the model to improvise around missing inputs.
 
 ## Safety and resource controls
 
@@ -216,7 +233,13 @@ python scripts/benchmark_analysis.py --offline
 
 Remove `--offline` to include live Lichess requests.
 
-The tests cover PGN parsing, Unicode and headerless games, upload limits, Stockfish normalization, Lichess failure behavior, theory alignment, motif smoke checks, AI schema validation, unsupported evidence rejection, caching, retryable provider failures, rate limits, frontend evaluation helpers, and production compilation.
+Verify configured external credentials with minimal requests:
+
+```bash
+python scripts/check_providers.py
+```
+
+The tests cover PGN parsing, Unicode and headerless games, upload limits, Stockfish MultiPV normalization, rating-filtered Lichess request shapes and outcomes, provider failure behavior, theory alignment, motif smoke checks, AI schema validation, unsupported evidence rejection, caching, incomplete-evidence rejection, rate limits, frontend evaluation helpers, and production compilation.
 
 ## Deployment
 
@@ -224,7 +247,7 @@ The repository includes a multi-stage `Dockerfile` and `railway.toml`.
 
 1. Create a Railway project from this repository.
 2. Let Railway build the included Dockerfile.
-3. Add `GEMINI_API_KEY` as a secret.
+3. Add `GEMINI_API_KEY` and `LICHESS_TOKEN` as secrets.
 4. Keep `APP_ENV=production`, `TRUST_PROXY=true`, and `STOCKFISH_DEPTH=14`.
 5. Confirm `/api/health` before sharing the URL.
 
@@ -235,7 +258,8 @@ The service is deployment-ready at the repository level, but this README does no
 - Analysis is intentionally opening-focused and defaults to the first 20 plies.
 - Motifs are handcrafted heuristics. They encode meaningful chess knowledge but can produce false positives or miss concepts.
 - Lichess statistics may be sparse or unavailable for unusual positions.
-- Stockfish UCI moves are not yet converted to SAN in every evidence display.
+- Opening descriptions are short project-authored summaries for common families; Lichess supplies the opening name and ECO code but not a stable description field.
+- Stockfish lines are converted to SAN for display, while UCI remains in the evidence package for exact machine alignment.
 - Gemini coaching can still be incorrect despite grounding and validation. It is educational assistance, not authoritative analysis.
 - Rate limiting and coaching cache are process-local; horizontal scaling would require shared infrastructure.
 - There are no user accounts or saved analysis histories.
@@ -243,8 +267,7 @@ The service is deployment-ready at the repository level, but this README does no
 ## Roadmap
 
 - Add fixture-based accuracy tests for individual motif detectors
-- Convert Stockfish lines from UCI to SAN for clearer coaching evidence
-- Add rating filters and player-specific Lichess exploration
+- Add optional individual-player Lichess exploration in addition to the current aggregate rating filters
 - Add queued full-game analysis after the opening workflow is stable
 - Add persistent shared caching if public usage justifies it
 - Publish a monitored deployment, product screenshot, and short demo video

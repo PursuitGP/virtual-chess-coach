@@ -2,7 +2,7 @@
 
 Use this checklist when recording the portfolio walkthrough:
 
-1. Open the deployed application and select **Try example game**.
+1. Open the deployed application, choose a Lichess rating pool, and select **Try example game**.
 2. Show the PGN metadata, board playback, evaluation bar, and graph.
 3. Step through several moves while showing Stockfish, Lichess, and motif evidence.
 4. Choose a coaching perspective.

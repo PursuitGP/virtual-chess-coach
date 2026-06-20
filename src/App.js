@@ -99,6 +99,11 @@ function LichessMove({ label, move }) {
       <span>{label}</span>
       <strong>
         {move.san || move.uci} · {formatPercent(move.popularity_pct)}
+        <small>
+          W {formatPercent(move.white_win_pct)} · D{" "}
+          {formatPercent(move.draw_pct)} · B{" "}
+          {formatPercent(move.black_win_pct)}
+        </small>
       </strong>
     </div>
   );
@@ -131,6 +136,7 @@ export default function App() {
   const [analysisError, setAnalysisError] = useState(null);
 
   const [perspective, setPerspective] = useState("both");
+  const [ratingGroup, setRatingGroup] = useState("");
   const [coaching, setCoaching] = useState(null);
   const [coachingLoading, setCoachingLoading] = useState(false);
   const [coachingError, setCoachingError] = useState(null);
@@ -226,6 +232,7 @@ export default function App() {
 
     const formData = new FormData();
     formData.append("file", file);
+    if (ratingGroup) formData.append("rating_group", ratingGroup);
 
     try {
       const response = await fetch(apiUrl("/api/analyze"), {
@@ -344,7 +351,12 @@ export default function App() {
     currentRecord?.stockfish?.evaluation
   );
   const barHeight = Math.min(100, Math.max(0, 50 + barEvaluation * 5));
-  const aiAvailable = health?.capabilities?.gemini?.available;
+  const aiAvailable = health?.capabilities?.gemini?.ready;
+  const lichessConfigured = health?.capabilities?.lichess?.configured;
+  const evidenceComplete =
+    analysis?.providers?.stockfish?.available &&
+    analysis?.providers?.lichess?.available &&
+    analysis?.providers?.motifs?.available;
 
   return (
     <main className="app-shell">
@@ -486,6 +498,30 @@ export default function App() {
                     </span>
                   </div>
                 )}
+                <label htmlFor="rating-group">
+                  Compare player choices by Lichess rating pool
+                </label>
+                <select
+                  id="rating-group"
+                  value={ratingGroup}
+                  onChange={(event) => setRatingGroup(event.target.value)}
+                  disabled={analysisLoading}
+                >
+                  <option value="">All ratings</option>
+                  <option value="0">Below 1000</option>
+                  <option value="1000">1000–1199</option>
+                  <option value="1200">1200–1399</option>
+                  <option value="1400">1400–1599</option>
+                  <option value="1600">1600–1799</option>
+                  <option value="1800">1800–1999</option>
+                  <option value="2000">2000–2199</option>
+                  <option value="2200">2200–2499</option>
+                  <option value="2500">2500+</option>
+                </select>
+                <p className="muted">
+                  Master statistics remain unfiltered. This filter changes the
+                  aggregate Lichess player comparison.
+                </p>
                 <PGNLoader onParsed={onPGNParsed} />
                 {analysisLoading && (
                   <div className="notice working">
@@ -555,7 +591,12 @@ export default function App() {
                     </strong>
                   </div>
                   <p className="line">
-                    PV: {currentRecord.stockfish.pv.join(" ") || "Unavailable"}
+                    Best line:{" "}
+                    {(
+                      currentRecord.stockfish.top_lines?.[0]?.moves_san ||
+                      currentRecord.stockfish.top_lines?.[0]?.moves_uci ||
+                      []
+                    ).join(" ") || "Unavailable"}
                   </p>
                 </div>
 
@@ -566,6 +607,11 @@ export default function App() {
                       ? `${currentRecord.lichess.opening.eco || ""} ${currentRecord.lichess.opening.name || ""}`.trim()
                       : "No named opening returned"}
                   </p>
+                  {currentRecord.lichess.opening_context?.description && (
+                    <p className="opening-context">
+                      {currentRecord.lichess.opening_context.description}
+                    </p>
+                  )}
                   <LichessMove
                     label="Master games"
                     move={currentRecord.lichess.masters.played_move}
@@ -577,6 +623,44 @@ export default function App() {
                   <p className="line">
                     Classification: {currentRecord.lichess.theory_status}
                   </p>
+                  <p className="line">
+                    Practical signal:{" "}
+                    {currentRecord.lichess.practical_signal?.classification ||
+                      "Unavailable"}
+                  </p>
+                  {currentRecord.lichess.practical_candidates?.length > 0 && (
+                    <div className="candidate-list">
+                      <strong>Engine-backed practical continuations</strong>
+                      {currentRecord.lichess.practical_candidates.map(
+                        (candidate) => (
+                          <div key={candidate.uci}>
+                            <span>
+                              #{candidate.stockfish_rank} {candidate.uci}
+                            </span>
+                            <small>
+                              {candidate.label}
+                              {candidate.masters
+                                ? ` · masters ${formatPercent(
+                                    candidate.masters.popularity_pct
+                                  )}`
+                                : ""}
+                              {candidate.players
+                                ? ` · players ${formatPercent(
+                                    candidate.players.popularity_pct
+                                  )}`
+                                : ""}
+                            </small>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )}
+                  {lichessConfigured === false && (
+                    <p className="notice warning">
+                      Add a server-side LICHESS_TOKEN to load master and player
+                      statistics.
+                    </p>
+                  )}
                 </div>
 
                 <div className="evidence-block">
@@ -637,7 +721,12 @@ export default function App() {
               type="button"
               className="primary-action"
               onClick={generateCoaching}
-              disabled={!analysis || coachingLoading || aiAvailable === false}
+              disabled={
+                !analysis ||
+                !evidenceComplete ||
+                coachingLoading ||
+                aiAvailable === false
+              }
             >
               {coachingLoading
                 ? "Gemini is synthesizing evidence…"
@@ -650,6 +739,13 @@ export default function App() {
               <div className="notice warning">
                 Gemini is not configured on this server. The evidence pipeline
                 remains available, but completed coaching requires Gemini.
+              </div>
+            )}
+            {analysis && !evidenceComplete && (
+              <div className="notice warning">
+                AI coaching is paused until Stockfish, Lichess, and motif
+                evidence are all available. Your completed evidence remains
+                visible.
               </div>
             )}
 

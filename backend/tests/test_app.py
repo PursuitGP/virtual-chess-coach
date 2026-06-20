@@ -17,7 +17,11 @@ SAMPLE_ANALYSIS = {
     "analyzed_plies": 1,
     "truncated": False,
     "warnings": [],
-    "providers": {},
+    "providers": {
+        "stockfish": {"available": True},
+        "lichess": {"available": True},
+        "motifs": {"available": True},
+    },
     "positions": [
         {
             "ply": 1,
@@ -69,12 +73,19 @@ class AppTests(unittest.TestCase):
         ):
             response = client.post(
                 "/api/analyze",
-                data={"file": (io.BytesIO(b"1. e4 *"), "game.pgn")},
+                data={
+                    "file": (io.BytesIO(b"1. e4 *"), "game.pgn"),
+                    "rating_group": "1600",
+                },
                 content_type="multipart/form-data",
             )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["analysis_id"], "abc")
         analyze.assert_called_once()
+        self.assertEqual(
+            analyze.call_args.kwargs["lichess_ratings"],
+            (1600,),
+        )
         explain.assert_not_called()
 
     def test_oversized_upload_is_rejected(self):
@@ -122,6 +133,24 @@ class AppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertTrue(body["retryable"])
         self.assertNotIn("explanations", body)
+
+    def test_explain_requires_complete_evidence(self):
+        client = self.make_app().test_client()
+        incomplete = {
+            **SAMPLE_ANALYSIS,
+            "providers": {
+                "stockfish": {"available": True},
+                "lichess": {"available": False},
+                "motifs": {"available": True},
+            },
+        }
+        response = client.post(
+            "/api/explain",
+            json={"analysis": incomplete, "perspective": "both"},
+        )
+        body = response.get_json()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(body["missing_providers"], ["lichess"])
 
     def test_separate_analysis_rate_limit(self):
         app = self.make_app(

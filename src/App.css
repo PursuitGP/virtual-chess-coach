@@ -290,15 +290,55 @@ label {
 }
 
 .evidence-row strong {
+  display: grid;
+  gap: 0.15rem;
   text-align: right;
+}
+
+.evidence-row small {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 500;
 }
 
 .line,
 .opening-name,
+.opening-context,
 .muted {
   color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.55;
+}
+
+.opening-context {
+  border-left: 2px solid var(--accent-strong);
+  padding-left: 0.65rem;
+}
+
+.candidate-list {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.8rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.7rem;
+}
+
+.candidate-list > strong {
+  color: var(--accent);
+  font-size: 0.75rem;
+}
+
+.candidate-list > div {
+  display: grid;
+  gap: 0.15rem;
+  border-radius: 8px;
+  background: rgba(7, 17, 15, 0.55);
+  padding: 0.5rem;
+}
+
+.candidate-list small {
+  color: var(--muted);
+  font-size: 0.68rem;
 }
 
 .motif-list {

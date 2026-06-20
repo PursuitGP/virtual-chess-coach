@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import io
+import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import requests
+import chess
+import chess.engine
 
 from backend import analysis
 
@@ -18,21 +21,35 @@ class FakeStockfish:
         self.fen = None
         self.calls = 0
 
-    def set_fen_position(self, fen):
-        self.fen = fen
-
-    def get_evaluation(self):
+    def analyse(self, board, _limit, multipv):
         self.calls += 1
-        return {"type": "cp", "value": self.calls * 20}
+        moves = list(board.legal_moves)[:multipv]
+        if not moves:
+            return [
+                {
+                    "score": chess.engine.PovScore(
+                        chess.engine.Cp(self.calls * 20),
+                        chess.WHITE,
+                    ),
+                    "pv": [],
+                }
+            ]
+        return [
+            {
+                "score": chess.engine.PovScore(
+                    chess.engine.Cp(self.calls * 20 - rank * 5),
+                    chess.WHITE,
+                ),
+                "pv": [move],
+            }
+            for rank, move in enumerate(moves)
+        ]
 
-    def get_top_moves(self, _count):
-        return [{"Move": "e7e5"}, {"Move": "c7c5"}]
-
-    def get_best_move(self):
-        return "e7e5"
+    def quit(self):
+        return None
 
 
-def explorer_fixture(fen, database):
+def explorer_fixture(fen, database, rating_groups=(), speeds=()):
     starting = fen.startswith("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP")
     if starting:
         return {
@@ -102,8 +119,8 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(result["analyzed_plies"], 4)
         self.assertEqual(first["played_move"]["san"], "e4")
         self.assertEqual(first["side"], "white")
-        self.assertEqual(first["stockfish"]["evaluation"]["display"], "+0.20")
-        self.assertIsNone(first["stockfish"]["eval_delta_cp"])
+        self.assertEqual(first["stockfish"]["evaluation"]["display"], "+0.40")
+        self.assertEqual(first["stockfish"]["eval_delta_cp"], 20)
         self.assertEqual(second["stockfish"]["eval_delta_cp"], 20)
         self.assertEqual(
             first["lichess"]["theory_status"],
@@ -113,6 +130,94 @@ class AnalysisTests(unittest.TestCase):
             first["lichess"]["opening"]["name"],
             "King's Pawn Game",
         )
+        self.assertEqual(
+            first["lichess"]["opening_context"]["family"],
+            "King's Pawn Game",
+        )
+        self.assertIn(
+            first["lichess"]["practical_signal"]["classification"],
+            {
+                "master-aligned-and-sound",
+                "common-rating-pool-choice",
+            },
+        )
+        self.assertTrue(first["stockfish"]["top_lines"])
+
+    def test_rating_filter_and_outcome_context_are_preserved(self):
+        calls = []
+
+        def fixture(fen, database, rating_groups=(), speeds=()):
+            calls.append((database, rating_groups, speeds))
+            return explorer_fixture(fen, database, rating_groups, speeds)
+
+        with (
+            patch.object(
+                analysis,
+                "create_stockfish",
+                return_value=FakeStockfish(),
+            ),
+            patch.object(
+                analysis,
+                "fetch_lichess_explorer",
+                side_effect=fixture,
+            ),
+        ):
+            result = analysis.build_analysis(
+                b"1. e4 e5 *",
+                lichess_ratings=(1600,),
+                lichess_speeds=("rapid",),
+            )
+
+        self.assertIn(("lichess", (1600,), ("rapid",)), calls)
+        self.assertIn(("masters", (), ()), calls)
+        played = result["positions"][0]["lichess"]["players"]["played_move"]
+        self.assertIn("mover_score_pct", played)
+        self.assertEqual(
+            result["filters"]["lichess_rating_groups"],
+            [1600],
+        )
+
+    def test_live_request_shape_uses_token_rating_and_speed_filters(self):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "white": 1,
+            "draws": 0,
+            "black": 0,
+            "moves": [],
+        }
+        response.raise_for_status.return_value = None
+        analysis.fetch_lichess_explorer.cache_clear()
+
+        with (
+            patch.dict(os.environ, {"LICHESS_TOKEN": "secret-token"}),
+            patch.object(
+                analysis._session,
+                "get",
+                return_value=response,
+            ) as get,
+        ):
+            analysis.fetch_lichess_explorer(
+                chess.Board().fen(),
+                "lichess",
+                (1600,),
+                ("rapid",),
+            )
+
+        request = get.call_args
+        self.assertEqual(
+            request.kwargs["headers"]["Authorization"],
+            "Bearer secret-token",
+        )
+        self.assertEqual(request.kwargs["params"]["ratings"], "1600")
+        self.assertEqual(request.kwargs["params"]["speeds"], "rapid")
+        self.assertTrue(
+            request.args[0].startswith("https://explorer.lichess.org/")
+        )
+
+    def test_rejects_invalid_rating_group(self):
+        with self.assertRaisesRegex(analysis.AnalysisError, "rating"):
+            analysis.normalize_rating_groups((1750,))
 
     def test_truncates_to_opening_window(self):
         pgn = (ROOT / "pgns" / "immortal_game_clean.pgn").read_bytes()
@@ -155,6 +260,10 @@ class AnalysisTests(unittest.TestCase):
         self.assertTrue(result["providers"]["stockfish"]["available"])
         self.assertFalse(result["providers"]["lichess"]["available"])
         self.assertTrue(any("Lichess" in warning for warning in result["warnings"]))
+        self.assertEqual(
+            result["positions"][0]["lichess"]["practical_signal"]["classification"],
+            "statistics-unavailable",
+        )
 
     def test_bundled_pgns_parse_and_motifs_do_not_crash(self):
         for path in sorted((ROOT / "pgns").glob("*.pgn")):

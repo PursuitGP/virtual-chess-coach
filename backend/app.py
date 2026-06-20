@@ -24,6 +24,12 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+BACKEND_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BACKEND_DIR.parent
+BUILD_DIR = PROJECT_ROOT / "build"
+
+load_dotenv(BACKEND_DIR / ".env")
+
 try:  # Package imports (Gunicorn / tests)
     from .ai_coach import (
         AIConfigurationError,
@@ -37,6 +43,7 @@ try:  # Package imports (Gunicorn / tests)
         AnalysisError,
         build_analysis,
         find_stockfish_path,
+        lichess_status,
     )
     from .motifs import detect_motifs
 except ImportError:  # Script imports (`python backend/app.py`)
@@ -48,16 +55,13 @@ except ImportError:  # Script imports (`python backend/app.py`)
         generate_explanations,
         gemini_status,
     )
-    from analysis import AnalysisError, build_analysis, find_stockfish_path
+    from analysis import (
+        AnalysisError,
+        build_analysis,
+        find_stockfish_path,
+        lichess_status,
+    )
     from motifs import detect_motifs
-
-
-BACKEND_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BACKEND_DIR.parent
-BUILD_DIR = PROJECT_ROOT / "build"
-
-load_dotenv(BACKEND_DIR / ".env")
-
 
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -194,6 +198,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
     def health():
         stockfish_path = find_stockfish_path()
         ai = gemini_status()
+        lichess = lichess_status()
         return jsonify(
             {
                 "status": "ok" if stockfish_path else "degraded",
@@ -204,7 +209,10 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                         "path": stockfish_path if app.config["APP_ENV"] != "production" else None,
                     },
                     "gemini": ai,
-                    "lichess": {"configured": True},
+                    "lichess": {
+                        **lichess,
+                        "verified": False,
+                    },
                     "motifs": {"available": True},
                 },
                 "limits": {
@@ -239,10 +247,26 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             )
 
         try:
+            rating_value = request.form.get("rating_group", "").strip()
+            ratings = (int(rating_value),) if rating_value else ()
+            speed_value = request.form.get("speeds", "").strip()
+            speeds = tuple(
+                value
+                for value in speed_value.split(",")
+                if value
+            )
             result = build_analysis(
                 pgn_bytes,
                 max_plies=app.config["MAX_ANALYSIS_PLIES"],
                 stockfish_depth=app.config["STOCKFISH_DEPTH"],
+                lichess_ratings=ratings,
+                lichess_speeds=speeds,
+            )
+        except ValueError:
+            return _error(
+                "Lichess filters were invalid.",
+                400,
+                "invalid_lichess_filters",
             )
         except AnalysisError as exc:
             return _error(
@@ -307,6 +331,20 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 "Perspective must be white, black, or both.",
                 400,
                 "invalid_perspective",
+            )
+        providers = analysis.get("providers") or {}
+        missing_evidence = [
+            name
+            for name in ("stockfish", "lichess", "motifs")
+            if not (providers.get(name) or {}).get("available")
+        ]
+        if missing_evidence:
+            return _error(
+                "AI coaching requires complete Stockfish, Lichess, and motif evidence.",
+                409,
+                "evidence_incomplete",
+                retryable=True,
+                missing_providers=missing_evidence,
             )
 
         cache_key = build_explanation_cache_key(analysis, perspective)

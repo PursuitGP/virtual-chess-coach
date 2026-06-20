@@ -8,9 +8,11 @@ from unittest.mock import patch
 from backend.ai_coach import (
     AIConfigurationError,
     AIResponseError,
+    _build_prompt,
     build_explanation_cache_key,
     generate_explanations,
     validate_explanations,
+    verify_gemini_connection,
 )
 
 
@@ -26,11 +28,25 @@ def sample_analysis():
                     "evaluation": {"type": "cp", "value": 20},
                     "eval_delta_cp": None,
                     "best_move": "e2e4",
-                    "pv": ["e2e4"],
+                    "top_lines": [
+                        {
+                            "rank": 1,
+                            "moves_uci": ["e2e4", "e7e5"],
+                        }
+                    ],
                 },
                 "lichess": {
-                    "opening": None,
+                    "opening": {"eco": "C20", "name": "King's Pawn Game"},
+                    "opening_context": {
+                        "description": "A central opening family.",
+                    },
                     "theory_status": "common-master-move",
+                    "practical_signal": {
+                        "classification": "master-aligned-and-sound"
+                    },
+                    "practical_candidates": [
+                        {"uci": "e7e5", "stockfish_rank": 1}
+                    ],
                     "masters": {
                         "played_move": None,
                         "continuations": [],
@@ -93,6 +109,23 @@ class AICoachValidationTests(unittest.TestCase):
         black = build_explanation_cache_key(sample_analysis(), "black")
         self.assertNotEqual(white, black)
 
+    def test_accepts_practical_lichess_evidence_references(self):
+        payload = valid_payload()
+        payload["explanations"][0]["evidence_refs"] = [
+            "lichess.opening_context",
+            "lichess.practical_signal",
+            "lichess.practical_candidates",
+            "stockfish.top_lines",
+        ]
+        result = validate_explanations(payload, sample_analysis())
+        self.assertEqual(len(result[0]["evidence_refs"]), 4)
+
+    def test_prompt_lists_only_refs_available_for_each_ply(self):
+        prompt = _build_prompt(sample_analysis(), "both")
+        self.assertIn('"available_evidence_refs"', prompt)
+        self.assertIn('"motifs.take_center"', prompt)
+        self.assertNotIn('"lichess.fake.statistic"', prompt)
+
     def test_generate_explanations_uses_structured_json_response(self):
         response = SimpleNamespace(
             text=__import__("json").dumps(valid_payload())
@@ -126,6 +159,20 @@ class AICoachValidationTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(AIResponseError, "malformed"):
                 generate_explanations(sample_analysis(), "both")
+
+    def test_provider_verification_reports_success_without_exposing_key(self):
+        response = SimpleNamespace(text='{"ok": true}')
+        models = SimpleNamespace(generate_content=lambda **_kwargs: response)
+        fake_genai = SimpleNamespace(
+            Client=lambda **_kwargs: SimpleNamespace(models=models)
+        )
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=True),
+            patch("backend.ai_coach._load_genai", return_value=fake_genai),
+        ):
+            status = verify_gemini_connection()
+        self.assertTrue(status["verified"])
+        self.assertNotIn("test-key", str(status))
 
 
 if __name__ == "__main__":
