@@ -37,6 +37,13 @@ MIN_MASTER_GAMES = int(os.getenv("MIN_MASTER_GAMES", "20"))
 SOUND_MOVE_LOSS_CP = int(os.getenv("SOUND_MOVE_LOSS_CP", "40"))
 MISTAKE_MOVE_LOSS_CP = int(os.getenv("MISTAKE_MOVE_LOSS_CP", "100"))
 COMMON_PLAYER_MOVE_PCT = float(os.getenv("COMMON_PLAYER_MOVE_PCT", "5"))
+MATERIAL_VALUES = {
+    chess.PAWN: 1,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK: 5,
+    chess.QUEEN: 9,
+}
 ALLOWED_RATING_GROUPS = {
     0,
     1000,
@@ -239,6 +246,143 @@ def _normalize_engine_score(
         status_code=502,
         retryable=True,
     )
+
+
+def _material_summary(board: chess.Board) -> dict[str, Any]:
+    totals = {}
+    for color, name in ((chess.WHITE, "white"), (chess.BLACK, "black")):
+        totals[name] = sum(
+            len(board.pieces(piece_type, color)) * value
+            for piece_type, value in MATERIAL_VALUES.items()
+        )
+    balance = totals["white"] - totals["black"]
+    return {
+        **totals,
+        "balance_white_pawns": balance,
+        "leader": "white" if balance > 0 else "black" if balance < 0 else None,
+        "advantage_pawns": abs(balance),
+    }
+
+
+def _evaluation_assessment(evaluation: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(evaluation, dict):
+        return {"classification": "unavailable", "leader": None}
+    if evaluation.get("type") == "mate":
+        return {
+            "classification": "forced_mate",
+            "leader": evaluation.get("winner"),
+            "mate_in": abs(int(evaluation.get("value") or 0)),
+        }
+
+    pawns = evaluation.get("pawns")
+    if not isinstance(pawns, (int, float)):
+        return {"classification": "unavailable", "leader": None}
+    magnitude = abs(float(pawns))
+    leader = "white" if pawns > 0 else "black" if pawns < 0 else None
+    if magnitude < 0.35:
+        classification = "roughly_equal"
+    elif magnitude < 1.5:
+        classification = "slight_edge"
+    elif magnitude < 3:
+        classification = "clear_advantage"
+    else:
+        classification = "decisive_advantage"
+    return {
+        "classification": classification,
+        "leader": leader,
+        "pawns": round(float(pawns), 2),
+    }
+
+
+def _move_quality(
+    record: dict[str, Any],
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> str:
+    mover = record.get("side")
+    before_type = (before or {}).get("type")
+    after_type = (after or {}).get("type")
+    if after_type == "mate":
+        winner = (after or {}).get("winner")
+        if winner == mover and before_type != "mate":
+            return "creates_forced_mate"
+        if winner != mover and before_type != "mate":
+            return "allows_forced_mate"
+        if winner == mover:
+            return "maintains_forced_mate"
+        return "fails_to_escape_forced_mate"
+    if before_type == "mate" and after_type != "mate":
+        winner = (before or {}).get("winner")
+        return "escapes_forced_mate" if winner != mover else "misses_forced_mate"
+
+    loss_cp = (record.get("stockfish") or {}).get("mover_loss_cp")
+    if not isinstance(loss_cp, int):
+        return "unclear"
+    if loss_cp >= 300:
+        return "blunder"
+    if loss_cp >= 100:
+        return "mistake"
+    if loss_cp >= 50:
+        return "inaccuracy"
+    return "sound"
+
+
+def add_decision_context(
+    records: list[dict[str, Any]],
+    initial_stockfish: dict[str, Any],
+) -> None:
+    previous_stockfish = initial_stockfish
+    previous_motifs: list[dict[str, Any]] = []
+
+    for record in records:
+        previous_line = (previous_stockfish.get("top_lines") or [{}])[0]
+        previous_moves_uci = previous_line.get("moves_uci") or []
+        previous_moves_san = previous_line.get("moves_san") or []
+        engine_first_uci = (
+            previous_moves_uci[0] if previous_moves_uci else None
+        )
+        engine_first_san = (
+            previous_moves_san[0] if previous_moves_san else None
+        )
+        played_uci = (record.get("played_move") or {}).get("uci")
+        played_matches = bool(
+            engine_first_uci and played_uci == engine_first_uci
+        )
+        tactical_before = any(
+            motif.get("severity") in {"warning", "tactical", "critical"}
+            for motif in previous_motifs
+            if isinstance(motif, dict)
+        )
+        evaluation_before = previous_stockfish.get("evaluation")
+        evaluation_after = (record.get("stockfish") or {}).get("evaluation")
+
+        record["decision_context"] = {
+            "evaluation_before": evaluation_before,
+            "evaluation_after": evaluation_after,
+            "assessment_before": _evaluation_assessment(evaluation_before),
+            "assessment_after": _evaluation_assessment(evaluation_after),
+            "move_quality": _move_quality(
+                record,
+                evaluation_before,
+                evaluation_after,
+            ),
+            "engine_first_choice": {
+                "uci": engine_first_uci,
+                "san": engine_first_san,
+                "line_san": previous_moves_san,
+                "line_uci": previous_moves_uci,
+            },
+            "played_matches_engine_first": played_matches,
+            "critical_tactical_position": tactical_before,
+            "critical_engine_response": played_matches and tactical_before,
+            "only_move": None,
+            "material_before": _material_summary(
+                chess.Board(record["previous_fen"])
+            ),
+            "material_after": _material_summary(chess.Board(record["fen"])),
+        }
+        previous_stockfish = record["stockfish"]
+        previous_motifs = record.get("motifs") or []
 
 
 def evaluate_with_stockfish(
@@ -963,6 +1107,11 @@ def add_motif_evidence(records: list[dict[str, Any]], warnings: list[str]) -> No
                 if record["stockfish"].get("top_lines")
                 else []
             ),
+            "pv_san": (
+                record["stockfish"]["top_lines"][0]["moves_san"]
+                if record["stockfish"].get("top_lines")
+                else []
+            ),
         }
         try:
             candidates = detect_motifs(
@@ -1097,6 +1246,7 @@ def build_analysis(
         speeds=speeds,
     )
     add_motif_evidence(positions, warnings)
+    add_decision_context(positions, initial_stockfish)
 
     metadata = {
         key: value
@@ -1138,7 +1288,7 @@ def build_analysis(
         },
     }
     result: dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "metadata": metadata,
         "filters": {
             "lichess_rating_groups": list(rating_groups),

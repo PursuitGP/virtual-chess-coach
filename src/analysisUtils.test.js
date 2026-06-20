@@ -3,6 +3,7 @@ import {
   evaluationForBar,
   evaluationLabel,
   fullMoveCount,
+  gameResultSummary,
   movePositionLabel,
   pointColor,
   readJsonResponse,
@@ -60,4 +61,30 @@ test("reports empty API responses without a JSON parser error", async () => {
   await expect(
     readJsonResponse(response, "Analysis failed.")
   ).rejects.toThrow("API returned an empty response");
+});
+
+test("summarizes checkmate and time-forfeit results with final notation", () => {
+  expect(
+    gameResultSummary(
+      { Result: "0-1", Termination: "checkmate" },
+      [
+        { san: "f3" },
+        { san: "e5" },
+        { san: "g4" },
+        { san: "Qh4#" },
+      ]
+    )
+  ).toEqual(
+    expect.objectContaining({
+      title: "Black wins by checkmate",
+      notation: "2... Qh4#",
+    })
+  );
+
+  expect(
+    gameResultSummary(
+      { Result: "1-0", Termination: "time forfeit" },
+      [{ san: "e4" }]
+    ).title
+  ).toBe("White wins on time");
 });

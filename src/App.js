@@ -22,6 +22,7 @@ import {
 } from "chart.js";
 import annotationPlugin from "chartjs-plugin-annotation";
 
+import ManualEntry from "./ManualEntry";
 import PGNLoader from "./PGNLoader";
 import {
   apiUrl,
@@ -29,6 +30,7 @@ import {
   evaluationForBar,
   evaluationLabel,
   fullMoveCount,
+  gameResultSummary,
   movePositionLabel,
   pointColor,
   readJsonResponse,
@@ -146,7 +148,7 @@ export default function App() {
   const [pgnMoves, setPgnMoves] = useState([]);
   const [pgnHeaders, setPgnHeaders] = useState(null);
   const [plyIndex, setPlyIndex] = useState(0);
-  const [pgnOpen, setPgnOpen] = useState(true);
+  const [screen, setScreen] = useState("welcome");
 
   const [analysis, setAnalysis] = useState(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
@@ -247,7 +249,7 @@ export default function App() {
     setAnalysisError(null);
     setCoaching(null);
     setCoachingError(null);
-    setPgnOpen(true);
+    setScreen("welcome");
   }
 
   function moveBoard(from, to) {
@@ -269,7 +271,7 @@ export default function App() {
     setCoachingError(null);
     setAnalysisError(null);
     setAnalysisLoading(true);
-    setPgnOpen(false);
+    setScreen("review");
     window.setTimeout(() => reviewRef.current?.focus(), 0);
 
     const formData = new FormData();
@@ -291,7 +293,9 @@ export default function App() {
       if (requestId !== requestIdRef.current) return;
       setAnalysis(data);
       setPgnHeaders(data.metadata || headers || {});
-      goTo(0);
+      const firstPly = moves.length ? 1 : 0;
+      setPlyIndex(firstPly);
+      setGame(replayMoves(moves, firstPly));
       setAnalysisLoading(false);
 
       if (!hasCompleteEvidence(data)) {
@@ -308,7 +312,7 @@ export default function App() {
     } catch (error) {
       if (requestId !== requestIdRef.current) return;
       setAnalysisError(error.message || "The PGN could not be analyzed.");
-      setPgnOpen(true);
+      setScreen("welcome");
     } finally {
       if (requestId === requestIdRef.current) {
         setAnalysisLoading(false);
@@ -433,34 +437,179 @@ export default function App() {
     },
   };
 
-  const barEvaluation = evaluationForBar(
-    currentRecord?.stockfish?.evaluation
-  );
+  const displayedStockfish =
+    currentRecord?.stockfish || analysis?.initial_stockfish || null;
+  const barEvaluation = evaluationForBar(displayedStockfish?.evaluation);
   const barHeight = Math.min(100, Math.max(0, 50 + barEvaluation * 5));
   const aiAvailable = health?.capabilities?.gemini?.ready;
   const lichessConfigured = health?.capabilities?.lichess?.configured;
   const evidenceComplete = hasCompleteEvidence(analysis);
   const totalFullMoves = fullMoveCount(pgnMoves.length);
+  const resultSummary = gameResultSummary(pgnHeaders, pgnMoves);
+  const bestContinuation =
+    displayedStockfish?.top_lines?.[0]?.moves_san?.[0] ||
+    displayedStockfish?.top_lines?.[0]?.moves_uci?.[0] ||
+    displayedStockfish?.best_move ||
+    "—";
+  const evalChange =
+    currentRecord?.stockfish?.eval_delta_pawns == null
+      ? "—"
+      : `${currentRecord.stockfish.eval_delta_pawns > 0 ? "+" : ""}${currentRecord.stockfish.eval_delta_pawns.toFixed(2)}`;
+
+  if (screen !== "review") {
+    return (
+      <main className="app-shell intake-shell">
+        <header className="intake-brand">
+          <div className="brand-mark" aria-hidden="true">
+            ♞
+          </div>
+          <div>
+            <p className="eyebrow">Evidence-grounded game review</p>
+            <strong>Virtual Chess Coach</strong>
+          </div>
+        </header>
+
+        {screen === "manual" ? (
+          <ManualEntry
+            boardSize={Math.min(boardSize, 520)}
+            onCancel={() => setScreen("welcome")}
+            onReady={onPGNParsed}
+          />
+        ) : (
+          <section className="welcome-layout">
+            <div className="welcome-copy">
+              <p className="eyebrow">Your game, explained</p>
+              <h1>Upload a game. Meet your coach.</h1>
+              <p>
+                Turn a chess game into clear, move-by-move instruction grounded
+                in Stockfish, opening data, and recognizable chess ideas.
+              </p>
+              <ul className="welcome-benefits">
+                <li>See why a move worked—or what it overlooked.</li>
+                <li>Learn the tactical and positional ideas in the position.</li>
+                <li>Get practical advice without reading an engine dashboard.</li>
+              </ul>
+            </div>
+
+            <div className="welcome-card">
+              <PGNLoader
+                onParsed={onPGNParsed}
+                disabled={analysisLoading}
+              />
+
+              <div className="manual-choice">
+                <div>
+                  <strong>Do not have a PGN file?</strong>
+                  <span>Recreate the game move by move on a board.</span>
+                </div>
+                <button
+                  type="button"
+                  className="ghost-action"
+                  onClick={() => setScreen("manual")}
+                >
+                  Input moves manually
+                </button>
+              </div>
+
+              <details className="intake-settings">
+                <summary>Optional comparison settings</summary>
+                <div>
+                  <label htmlFor="rating-group">
+                    Compare choices with this Lichess rating pool
+                  </label>
+                  <select
+                    id="rating-group"
+                    value={ratingGroup}
+                    onChange={(event) => setRatingGroup(event.target.value)}
+                    disabled={analysisLoading}
+                  >
+                    <option value="">All ratings</option>
+                    <option value="0">Below 1000</option>
+                    <option value="1000">1000–1199</option>
+                    <option value="1200">1200–1399</option>
+                    <option value="1400">1400–1599</option>
+                    <option value="1600">1600–1799</option>
+                    <option value="1800">1800–1999</option>
+                    <option value="2000">2000–2199</option>
+                    <option value="2200">2200–2499</option>
+                    <option value="2500">2500+</option>
+                  </select>
+                  <p className="muted">
+                    Master statistics remain unfiltered. This only changes the
+                    aggregate player comparison.
+                  </p>
+                </div>
+              </details>
+
+              {analysisError && (
+                <div className="notice error">{analysisError}</div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {reviewLoading && (
+          <div className="review-overlay" role="status" aria-live="polite">
+            <div className="review-card">
+              <div className="review-spinner" />
+              <p className="eyebrow">Automatic game review</p>
+              <h2>Preparing your analysis</h2>
+              <p>
+                Stockfish, Lichess, and the motif engine are building the
+                evidence for your coach.
+              </p>
+              <small>{reviewElapsed}s elapsed · please keep this tab open</small>
+            </div>
+          </div>
+        )}
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell">
-      <header className="hero">
-        <div>
-          <p className="eyebrow">Evidence-grounded AI chess analysis</p>
-          <h1>Virtual Chess Coach</h1>
-          <p className="hero-copy">
-            Stockfish calculation, Lichess opening statistics, and custom chess
-            motifs become structured evidence for position-specific AI coaching.
-          </p>
+      <header className="review-header">
+        <div className="review-brand">
+          <div className="brand-mark" aria-hidden="true">
+            ♞
+          </div>
+          <div>
+            <p className="eyebrow">Game review</p>
+            <h1>Virtual Chess Coach</h1>
+          </div>
         </div>
-        <div className="pipeline" aria-label="Analysis pipeline">
-          <span>PGN</span>
-          <b>→</b>
-          <span>Evidence</span>
-          <b>→</b>
-          <span>AI Coach</span>
-        </div>
+        <button type="button" onClick={resetReview}>
+          Analyze another game
+        </button>
       </header>
+
+      <section className="review-summary">
+        {resultSummary && (
+          <div className={`result-banner ${resultSummary.reason}`}>
+            <div>
+              <p className="eyebrow">Game result</p>
+              <h2>{resultSummary.title}</h2>
+            </div>
+            {resultSummary.notation && (
+              <strong className="final-notation">
+                Final move · {resultSummary.notation}
+              </strong>
+            )}
+          </div>
+        )}
+        {pgnHeaders && (
+          <div className="game-context">
+            <strong>
+              {pgnHeaders.White || "White"} vs {pgnHeaders.Black || "Black"}
+            </strong>
+            <span>
+              {[pgnHeaders.Event, pgnHeaders.Date, pgnHeaders.Result]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
+          </div>
+        )}
+      </section>
 
       <section className="workspace">
         <div className="board-column">
@@ -479,9 +628,6 @@ export default function App() {
                 }
               >
                 Flip board
-              </button>
-              <button type="button" onClick={resetReview}>
-                New game
               </button>
               <span className="toolbar-spacer" />
               <button
@@ -522,14 +668,33 @@ export default function App() {
             </div>
 
             <div className="board-wrap">
-              <div className="eval-label">
-                {evaluationLabel(currentRecord?.stockfish?.evaluation)}
-              </div>
-              <div className="eval-bar" aria-label="Stockfish evaluation">
+              <div className="engine-rail">
+                <div className="engine-readout">
+                  <span>
+                    <small>Eval</small>
+                    <strong>
+                      {evaluationLabel(displayedStockfish?.evaluation)}
+                    </strong>
+                  </span>
+                  <span>
+                    <small>Change</small>
+                    <strong>{evalChange}</strong>
+                  </span>
+                  <span>
+                    <small>{currentRecord ? "Best reply" : "Best move"}</small>
+                    <strong>{bestContinuation}</strong>
+                  </span>
+                </div>
                 <div
-                  className="eval-fill"
-                  style={{ height: `${barHeight}%` }}
-                />
+                  className="eval-bar"
+                  aria-label="Stockfish evaluation"
+                  style={{ height: `${boardSize}px` }}
+                >
+                  <div
+                    className="eval-fill"
+                    style={{ height: `${barHeight}%` }}
+                  />
+                </div>
               </div>
               <Chessground
                 width={boardSize}
@@ -551,312 +716,96 @@ export default function App() {
               />
             </div>
 
-            <div className="chart-wrap">
-              {chartPoints.length ? (
-                <Line data={chartData} options={chartOptions} />
-              ) : (
-                <div className="empty-state">
-                  Upload a PGN to build the Stockfish evaluation history.
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="panel">
-            <button
-              type="button"
-              className="panel-toggle"
-              onClick={() => setPgnOpen((value) => !value)}
-            >
-              <span>PGN intake</span>
-              <span>{pgnOpen ? "Hide" : "Show"}</span>
-            </button>
-            {pgnOpen && (
-              <div className="panel-body">
-                {pgnHeaders && (
-                  <div className="game-heading">
-                    <strong>
-                      {pgnHeaders.White || "White"} vs{" "}
-                      {pgnHeaders.Black || "Black"}
-                    </strong>
-                    <span>
-                      {[pgnHeaders.Event, pgnHeaders.Date, pgnHeaders.Result]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </span>
+            <details className="chart-disclosure" open>
+              <summary>Evaluation graph</summary>
+              <div className="chart-wrap">
+                {chartPoints.length ? (
+                  <Line data={chartData} options={chartOptions} />
+                ) : (
+                  <div className="empty-state">
+                    The evaluation history is not available yet.
                   </div>
                 )}
-                <label htmlFor="rating-group">
-                  Compare player choices by Lichess rating pool
-                </label>
-                <select
-                  id="rating-group"
-                  value={ratingGroup}
-                  onChange={(event) => setRatingGroup(event.target.value)}
-                  disabled={analysisLoading}
-                >
-                  <option value="">All ratings</option>
-                  <option value="0">Below 1000</option>
-                  <option value="1000">1000–1199</option>
-                  <option value="1200">1200–1399</option>
-                  <option value="1400">1400–1599</option>
-                  <option value="1600">1600–1799</option>
-                  <option value="1800">1800–1999</option>
-                  <option value="2000">2000–2199</option>
-                  <option value="2200">2200–2499</option>
-                  <option value="2500">2500+</option>
-                </select>
-                <p className="muted">
-                  Master statistics remain unfiltered. This filter changes the
-                  aggregate Lichess player comparison.
-                </p>
-                <PGNLoader onParsed={onPGNParsed} />
-                {analysisLoading && (
-                  <div className="notice working">
-                    Reviewing {totalFullMoves} chess moves with Stockfish,
-                    Lichess, and motif detection…
-                  </div>
-                )}
-                {analysisError && (
-                  <div className="notice error">{analysisError}</div>
-                )}
-                {analysis && !analysisLoading && (
-                  <div className="notice success">
-                    Analyzed {fullMoveCount(analysis.analyzed_plies)} of{" "}
-                    {fullMoveCount(analysis.total_plies)} chess moves.
-                    {coachingLoading
-                      ? " AI coaching is being generated automatically."
-                      : coaching
-                        ? " Coaching is ready."
-                        : ""}
-                  </div>
-                )}
-                {analysis?.warnings?.map((warning) => (
-                  <div className="notice warning" key={warning}>
-                    {warning}
-                  </div>
-                ))}
               </div>
-            )}
+            </details>
           </div>
         </div>
 
         <aside className="insight-column">
-          <section className="panel">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Current position</p>
-                <h2>Evidence</h2>
-              </div>
-              {currentRecord && (
-                <span className="ply-badge">
-                  Move {currentRecord.fullmove_number} ·{" "}
-                  {currentRecord.side === "white" ? "White" : "Black"}:{" "}
-                  {currentRecord.played_move.san}
-                </span>
-              )}
-            </div>
-
-            {!currentRecord ? (
-              <div className="empty-state">
-                Step to an analyzed move to inspect its evidence.
-              </div>
-            ) : (
-              <div className="evidence-stack">
-                <div className="evidence-block">
-                  <h3>Stockfish</h3>
-                  <div className="evidence-row">
-                    <span>Evaluation</span>
-                    <strong>
-                      {evaluationLabel(currentRecord.stockfish.evaluation)}
-                    </strong>
-                  </div>
-                  <div className="evidence-row">
-                    <span>Change</span>
-                    <strong>
-                      {currentRecord.stockfish.eval_delta_pawns == null
-                        ? "—"
-                        : `${currentRecord.stockfish.eval_delta_pawns > 0 ? "+" : ""}${currentRecord.stockfish.eval_delta_pawns.toFixed(2)}`}
-                    </strong>
-                  </div>
-                  <div className="evidence-row">
-                    <span>Best move</span>
-                    <strong>
-                      {currentRecord.stockfish.best_move || "Unavailable"}
-                    </strong>
-                  </div>
-                  <p className="line">
-                    Best line:{" "}
-                    {(
-                      currentRecord.stockfish.top_lines?.[0]?.moves_san ||
-                      currentRecord.stockfish.top_lines?.[0]?.moves_uci ||
-                      []
-                    ).join(" ") || "Unavailable"}
-                  </p>
-                </div>
-
-                <div className="evidence-block">
-                  <h3>Lichess Explorer</h3>
-                  <p className="opening-name">
-                    {currentRecord.lichess.opening
-                      ? `${currentRecord.lichess.opening.eco || ""} ${currentRecord.lichess.opening.name || ""}`.trim()
-                      : "No named opening returned"}
-                  </p>
-                  {currentRecord.lichess.opening_context?.description && (
-                    <p className="opening-context">
-                      {currentRecord.lichess.opening_context.description}
-                    </p>
-                  )}
-                  <LichessMove
-                    label="Master games"
-                    move={currentRecord.lichess.masters.played_move}
-                  />
-                  <LichessMove
-                    label="Lichess games"
-                    move={currentRecord.lichess.players.played_move}
-                  />
-                  <p className="line">
-                    Classification: {currentRecord.lichess.theory_status}
-                  </p>
-                  <p className="line">
-                    Practical signal:{" "}
-                    {currentRecord.lichess.practical_signal?.classification ||
-                      "Unavailable"}
-                  </p>
-                  {currentRecord.lichess.practical_candidates?.length > 0 && (
-                    <div className="candidate-list">
-                      <strong>Engine-backed practical continuations</strong>
-                      {currentRecord.lichess.practical_candidates.map(
-                        (candidate) => (
-                          <div key={candidate.uci}>
-                            <span>
-                              #{candidate.stockfish_rank} {candidate.uci}
-                            </span>
-                            <small>
-                              {candidate.label}
-                              {candidate.masters
-                                ? ` · masters ${formatPercent(
-                                    candidate.masters.popularity_pct
-                                  )}`
-                                : ""}
-                              {candidate.players
-                                ? ` · players ${formatPercent(
-                                    candidate.players.popularity_pct
-                                  )}`
-                                : ""}
-                            </small>
-                          </div>
-                        )
-                      )}
-                    </div>
-                  )}
-                  {lichessConfigured === false && (
-                    <p className="notice warning">
-                      Add a server-side LICHESS_TOKEN to load master and player
-                      statistics.
-                    </p>
-                  )}
-                </div>
-
-                <div className="evidence-block">
-                  <h3>Detected concepts</h3>
-                  {currentRecord.motifs?.length ? (
-                    <ul className="motif-list">
-                      {currentRecord.motifs.map((motif, index) => (
-                        <li key={`${motif.id}-${index}`}>
-                          <strong>
-                            {motif.name}
-                            {motif.confidence && (
-                              <small>{motif.confidence} confidence</small>
-                            )}
-                          </strong>
-                          <span>{motif.explanation}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="muted">No motif fired for this position.</p>
-                  )}
-                  {currentRecord.motif_candidates_suppressed > 0 && (
-                    <p className="muted motif-suppressed">
-                      {currentRecord.motif_candidates_suppressed} experimental
-                      detector candidate
-                      {currentRecord.motif_candidates_suppressed === 1
-                        ? ""
-                        : "s"}{" "}
-                      withheld pending validation.
-                    </p>
-                  )}
-                </div>
-              </div>
-            )}
-          </section>
-
           <section className="panel coach-panel">
             <div className="section-heading">
               <div>
-                <p className="eyebrow">Synthesis layer</p>
+                <p className="eyebrow">Your move-by-move guide</p>
                 <h2>AI Coach</h2>
               </div>
-              <span
-                className={`status-dot ${
-                  coachingLoading
-                    ? "working"
-                    : coaching
-                      ? "ready"
-                      : coachingError
-                        ? "failed"
-                        : ""
-                }`}
-                title="AI coaching status"
-              />
+              <div className="coach-heading-status">
+                {currentRecord && (
+                  <span className="ply-badge">
+                    {currentRecord.fullmove_number}
+                    {currentRecord.side === "white" ? "." : "..."}{" "}
+                    {currentRecord.played_move.san}
+                  </span>
+                )}
+                <span
+                  className={`status-dot ${
+                    coachingLoading
+                      ? "working"
+                      : coaching
+                        ? "ready"
+                        : coachingError
+                          ? "failed"
+                          : ""
+                  }`}
+                  title="AI coaching status"
+                />
+              </div>
             </div>
 
-            <label htmlFor="perspective">Coaching perspective</label>
-            <select
-              id="perspective"
-              value={perspective}
-              onChange={(event) => changePerspective(event.target.value)}
-              disabled={analysisLoading || coachingLoading}
-            >
-              <option value="both">Both sides</option>
-              <option value="white">White</option>
-              <option value="black">Black</option>
-            </select>
-
-            {analysis && (
-              <button
-                type="button"
-                className="primary-action"
-                onClick={() => generateCoaching()}
-                disabled={
-                  !evidenceComplete ||
-                  coachingLoading ||
-                  aiAvailable === false
-                }
+            <div className="coach-controls">
+              <label htmlFor="perspective">Coaching perspective</label>
+              <select
+                id="perspective"
+                value={perspective}
+                onChange={(event) => changePerspective(event.target.value)}
+                disabled={analysisLoading || coachingLoading}
               >
-                {coachingLoading
-                  ? "Gemini is synthesizing evidence…"
-                  : coaching
-                    ? "Regenerate AI coaching"
-                    : "Retry AI coaching"}
-              </button>
-            )}
+                <option value="both">Both sides</option>
+                <option value="white">White</option>
+                <option value="black">Black</option>
+              </select>
+
+              {analysis && (
+                <button
+                  type="button"
+                  className="primary-action"
+                  onClick={() => generateCoaching()}
+                  disabled={
+                    !evidenceComplete ||
+                    coachingLoading ||
+                    aiAvailable === false
+                  }
+                >
+                  {coachingLoading
+                    ? "Gemini is synthesizing evidence…"
+                    : coaching
+                      ? "Regenerate coaching"
+                      : "Retry coaching"}
+                </button>
+              )}
+            </div>
 
             {aiAvailable === false && (
               <div className="notice warning">
-                Gemini is not configured on this server. The evidence pipeline
-                remains available, but completed coaching requires Gemini.
+                Gemini is not configured on this server. The evidence review is
+                still available.
               </div>
             )}
             {analysis && !evidenceComplete && (
               <div className="notice warning">
-                AI coaching is paused until Stockfish, Lichess, and motif
-                evidence are all available. Your completed evidence remains
-                visible.
+                Coaching is paused until the complete evidence package is
+                available.
               </div>
             )}
-
             {coachingError && (
               <div className="notice error">
                 <strong>AI coaching was not generated.</strong>
@@ -868,7 +817,6 @@ export default function App() {
                 )}
               </div>
             )}
-
             {coachingLoading && (
               <div className="coach-loading">
                 <span />
@@ -876,19 +824,16 @@ export default function App() {
                 <span />
               </div>
             )}
-
             {!coaching && !coachingLoading && !coachingError && (
               <div className="empty-state">
-                Upload a game to run the complete review automatically.
+                Coaching will appear here when the review is ready.
               </div>
             )}
-
             {coaching && plyIndex === 0 && (
               <div className="notice success">
-                Coaching is ready. Step through the analyzed moves to read it.
+                Coaching is ready. Move forward once to begin the review.
               </div>
             )}
-
             {currentExplanation && (
               <article className="coaching-copy">
                 <p className="coach-move">
@@ -909,6 +854,179 @@ export default function App() {
                   </ul>
                 </details>
               </article>
+            )}
+          </section>
+
+          <section className="panel supporting-panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Go deeper when you want</p>
+                <h2>Supporting analysis</h2>
+              </div>
+              {currentRecord && (
+                <span className="ply-badge">
+                  Move {currentRecord.fullmove_number} ·{" "}
+                  {currentRecord.side === "white" ? "White" : "Black"}:{" "}
+                  {currentRecord.played_move.san}
+                </span>
+              )}
+            </div>
+
+            {!currentRecord ? (
+              <div className="empty-state">
+                Step to a move to inspect its supporting analysis.
+              </div>
+            ) : (
+              <div className="supporting-details">
+                <details>
+                  <summary>
+                    <span>Stockfish line</span>
+                    <small>
+                      {evaluationLabel(currentRecord.stockfish.evaluation)}
+                    </small>
+                  </summary>
+                  <div className="evidence-block">
+                    <div className="evidence-row">
+                      <span>Evaluation</span>
+                      <strong>
+                        {evaluationLabel(currentRecord.stockfish.evaluation)}
+                      </strong>
+                    </div>
+                    <div className="evidence-row">
+                      <span>Change</span>
+                      <strong>
+                        {currentRecord.stockfish.eval_delta_pawns == null
+                          ? "—"
+                          : `${currentRecord.stockfish.eval_delta_pawns > 0 ? "+" : ""}${currentRecord.stockfish.eval_delta_pawns.toFixed(2)}`}
+                      </strong>
+                    </div>
+                    <div className="evidence-row">
+                      <span>Best reply</span>
+                      <strong>
+                        {currentRecord.stockfish.top_lines?.[0]?.moves_san?.[0] ||
+                          currentRecord.stockfish.best_move ||
+                          "Unavailable"}
+                      </strong>
+                    </div>
+                    <p className="line">
+                      Engine line:{" "}
+                      {(
+                        currentRecord.stockfish.top_lines?.[0]?.moves_san ||
+                        currentRecord.stockfish.top_lines?.[0]?.moves_uci ||
+                        []
+                      ).join(" ") || "Unavailable"}
+                    </p>
+                  </div>
+                </details>
+
+                <details>
+                  <summary>
+                    <span>Detected chess concepts</span>
+                    <small>{currentRecord.motifs?.length || 0} found</small>
+                  </summary>
+                  <div className="evidence-block">
+                    {currentRecord.motifs?.length ? (
+                      <ul className="motif-list">
+                        {currentRecord.motifs.map((motif, index) => (
+                          <li key={`${motif.id}-${index}`}>
+                            <strong>
+                              {motif.name}
+                              {motif.confidence && (
+                                <small>{motif.confidence} confidence</small>
+                              )}
+                            </strong>
+                            <span>{motif.explanation}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="muted">
+                        No validated motif fired for this position.
+                      </p>
+                    )}
+                    {currentRecord.motif_candidates_suppressed > 0 && (
+                      <p className="muted motif-suppressed">
+                        {currentRecord.motif_candidates_suppressed} additional
+                        experimental pattern
+                        {currentRecord.motif_candidates_suppressed === 1
+                          ? ""
+                          : "s"}{" "}
+                        stayed hidden because they have not passed validation.
+                      </p>
+                    )}
+                  </div>
+                </details>
+
+                <details>
+                  <summary>
+                    <span>Lichess opening explorer</span>
+                    <small>
+                      {currentRecord.lichess.opening?.eco || "Position data"}
+                    </small>
+                  </summary>
+                  <div className="evidence-block">
+                    <p className="opening-name">
+                      {currentRecord.lichess.opening
+                        ? `${currentRecord.lichess.opening.eco || ""} ${currentRecord.lichess.opening.name || ""}`.trim()
+                        : "No named opening returned"}
+                    </p>
+                    {currentRecord.lichess.opening_context?.description && (
+                      <p className="opening-context">
+                        {currentRecord.lichess.opening_context.description}
+                      </p>
+                    )}
+                    <LichessMove
+                      label="Master games"
+                      move={currentRecord.lichess.masters.played_move}
+                    />
+                    <LichessMove
+                      label="Lichess games"
+                      move={currentRecord.lichess.players.played_move}
+                    />
+                    <p className="line">
+                      Classification: {currentRecord.lichess.theory_status}
+                    </p>
+                    <p className="line">
+                      Practical signal:{" "}
+                      {currentRecord.lichess.practical_signal?.classification ||
+                        "Unavailable"}
+                    </p>
+                    {currentRecord.lichess.practical_candidates?.length > 0 && (
+                      <div className="candidate-list">
+                        <strong>Engine-backed practical continuations</strong>
+                        {currentRecord.lichess.practical_candidates.map(
+                          (candidate) => (
+                            <div key={candidate.uci}>
+                              <span>
+                                #{candidate.stockfish_rank} {candidate.uci}
+                              </span>
+                              <small>
+                                {candidate.label}
+                                {candidate.masters
+                                  ? ` · masters ${formatPercent(
+                                      candidate.masters.popularity_pct
+                                    )}`
+                                  : ""}
+                                {candidate.players
+                                  ? ` · players ${formatPercent(
+                                      candidate.players.popularity_pct
+                                    )}`
+                                  : ""}
+                              </small>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    )}
+                    {lichessConfigured === false && (
+                      <p className="notice warning">
+                        Add a server-side LICHESS_TOKEN to load master and
+                        player statistics.
+                      </p>
+                    )}
+                  </div>
+                </details>
+              </div>
             )}
           </section>
 
@@ -961,6 +1079,15 @@ export default function App() {
                 <p className="muted">No PGN loaded.</p>
               )}
             </div>
+            {analysis?.warnings?.length > 0 && (
+              <div className="review-warnings">
+                {analysis.warnings.map((warning) => (
+                  <div className="notice warning" key={warning}>
+                    {warning}
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         </aside>
       </section>

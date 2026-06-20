@@ -9,6 +9,10 @@ from backend.ai_coach import (
     AIConfigurationError,
     AIResponseError,
     _build_prompt,
+    _condense_analysis,
+    _ground_explanation,
+    _required_coaching_points,
+    _response_json_schema,
     build_explanation_cache_key,
     generate_explanations,
     validate_explanations,
@@ -34,6 +38,20 @@ def sample_analysis():
                             "moves_uci": ["e2e4", "e7e5"],
                         }
                     ],
+                },
+                "decision_context": {
+                    "assessment_before": {
+                        "classification": "roughly_equal",
+                        "leader": None,
+                    },
+                    "assessment_after": {
+                        "classification": "slight_edge",
+                        "leader": "white",
+                    },
+                    "move_quality": "sound",
+                    "critical_tactical_position": False,
+                    "critical_engine_response": False,
+                    "only_move": None,
                 },
                 "lichess": {
                     "opening": {"eco": "C20", "name": "King's Pawn Game"},
@@ -71,7 +89,11 @@ def valid_payload():
                 "side": "white",
                 "explanation": (
                     "White occupies the center and opens lines for both the queen "
-                    "and bishop. The supplied engine evidence supports this move."
+                    "and bishop. The supplied engine evidence supports this move "
+                    "without showing a meaningful concession. Black must now "
+                    "decide how to challenge the central pawn and complete "
+                    "development. This gives White useful space while keeping "
+                    "several sound plans available."
                 ),
                 "lesson": "Use central pawn moves to unlock development.",
                 "evidence_refs": [
@@ -124,7 +146,170 @@ class AICoachValidationTests(unittest.TestCase):
         prompt = _build_prompt(sample_analysis(), "both")
         self.assertIn('"available_evidence_refs"', prompt)
         self.assertIn('"motifs.take_center"', prompt)
+        self.assertIn('"sequence_context"', prompt)
+        self.assertIn('"decision_context"', prompt)
+        self.assertIn('"required_coaching_points"', prompt)
+        self.assertIn("Never say \"only move\"", prompt)
+        self.assertIn("4-6 complete sentences", prompt)
         self.assertNotIn('"lichess.fake.statistic"', prompt)
+
+    def test_condensed_analysis_includes_adjacent_position_context(self):
+        analysis = sample_analysis()
+        second = {
+            **analysis["positions"][0],
+            "ply": 2,
+            "side": "black",
+            "played_move": {"san": "e5", "uci": "e7e5"},
+        }
+        analysis["positions"].append(second)
+        condensed = _condense_analysis(analysis)
+        first = condensed["positions"][0]
+        second_condensed = condensed["positions"][1]
+        self.assertEqual(
+            first["sequence_context"]["next_position"]["played_move"]["san"],
+            "e5",
+        )
+        self.assertIn("context.next_position", first["available_evidence_refs"])
+        self.assertIn(
+            "context.previous_position",
+            second_condensed["available_evidence_refs"],
+        )
+
+    def test_rejects_surface_level_two_sentence_coaching(self):
+        payload = valid_payload()
+        payload["explanations"][0]["explanation"] = (
+            "White occupies the center with e4. This is an active opening move."
+        )
+        with self.assertRaisesRegex(AIResponseError, "too short|4 to 6"):
+            validate_explanations(payload, sample_analysis())
+
+    def test_response_schema_requires_one_structured_object_per_position(self):
+        analysis = sample_analysis()
+        schema = _response_json_schema(analysis)
+        explanations = schema["properties"]["explanations"]
+        self.assertEqual(explanations["minItems"], 1)
+        self.assertEqual(explanations["maxItems"], 1)
+        item = explanations["prefixItems"][0]
+        self.assertEqual(item["type"], "object")
+        self.assertIn("explanation", item["required"])
+        self.assertEqual(item["properties"]["move"]["enum"], ["e4"])
+        self.assertIn(
+            "motifs.take_center",
+            item["properties"]["evidence_refs"]["items"]["enum"],
+        )
+        self.assertIn(
+            "decision_context",
+            item["properties"]["evidence_refs"]["items"]["enum"],
+        )
+
+    def test_required_points_force_mate_blunder_contrast(self):
+        position = {
+            "ply": 14,
+            "decision_context": {
+                "assessment_before": {
+                    "classification": "slight_edge",
+                    "leader": "white",
+                },
+                "assessment_after": {
+                    "classification": "forced_mate",
+                    "leader": "white",
+                },
+                "move_quality": "allows_forced_mate",
+                "engine_first_choice": {"san": "Ke6"},
+                "material_after": {
+                    "leader": "black",
+                    "advantage_pawns": 2,
+                },
+            },
+            "stockfish": {
+                "top_lines": [{"moves_san": ["Bxd5+", "Qxd5", "Qxd5+"]}]
+            },
+            "motifs": [
+                {
+                    "id": "forced_mate",
+                    "extra": {
+                        "defending_king_square": "g8",
+                        "safe_adjacent_square_count": 0,
+                        "mate_line_san": [
+                            "Bxd5+",
+                            "Qxd5",
+                            "Qxd5+",
+                            "Be6",
+                            "Qxe6#",
+                        ],
+                    },
+                }
+            ],
+        }
+        points = _required_coaching_points(position)
+        self.assertTrue(any("not a forced mate" in point for point in points))
+        self.assertTrue(any("Ke6" in point for point in points))
+        self.assertTrue(any("0 immediately safe" in point for point in points))
+        self.assertTrue(any("Bxd5+" in point for point in points))
+
+    def test_grounding_adds_best_defense_and_material_context(self):
+        position = {
+            "ply": 13,
+            "side": "white",
+            "stockfish": {
+                "top_lines": [{"moves_san": ["Ke6", "Nc3"]}]
+            },
+            "decision_context": {
+                "assessment_after": {
+                    "classification": "slight_edge",
+                    "leader": "white",
+                },
+                "material_after": {
+                    "leader": "black",
+                    "advantage_pawns": 2,
+                },
+                "only_move": None,
+            },
+            "motifs": [
+                {
+                    "id": "fork",
+                    "extra": {
+                        "includes_check": True,
+                        "forking_piece": {
+                            "piece": "queen",
+                            "square": "f3",
+                        },
+                        "targets": [
+                            {"piece": "king", "square": "f7"},
+                            {"piece": "knight", "square": "d5"},
+                        ],
+                    },
+                }
+            ],
+        }
+        explanation, refs = _ground_explanation(
+            "White checks with the queen on f3. The queen also attacks the "
+            "knight on d5. Black must answer the check immediately. White "
+            "keeps the initiative in a sharp position.",
+            position,
+        )
+        self.assertIn("Ke6", explanation)
+        self.assertIn("2 points ahead in material", explanation)
+        self.assertIn("only a slight edge for white", explanation)
+        self.assertIn("decision_context", refs)
+        self.assertIn("motifs.fork", refs)
+
+    def test_grounding_removes_routine_engine_applause(self):
+        explanation, _refs = _ground_explanation(
+            "White claims the center with e4. The pawn opens the bishop and "
+            "queen. Black must decide how to challenge the center. The engine "
+            "evaluation confirms this is a sound opening move.",
+            {
+                "ply": 1,
+                "decision_context": {
+                    "critical_tactical_position": False,
+                    "only_move": None,
+                },
+                "motifs": [],
+            },
+        )
+        self.assertNotIn("confirms this is a sound", explanation)
+        self.assertIn("not a numerical verdict", explanation)
 
     def test_generate_explanations_uses_structured_json_response(self):
         response = SimpleNamespace(

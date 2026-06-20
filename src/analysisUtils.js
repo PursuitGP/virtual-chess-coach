@@ -77,3 +77,56 @@ export function buildExplanationMap(explanations) {
   }
   return result;
 }
+
+export function gameResultSummary(headers, moves) {
+  const metadata = headers || {};
+  const result = metadata.Result || "*";
+  const termination = String(metadata.Termination || "").toLowerCase();
+  const finalMove = Array.isArray(moves) && moves.length
+    ? moves[moves.length - 1]
+    : null;
+  const finalSan = finalMove?.san || "";
+  const checkmate = finalSan.includes("#") || termination.includes("checkmate");
+  const onTime =
+    termination.includes("time") ||
+    termination.includes("flag") ||
+    termination.includes("forfeit");
+  const resigned =
+    termination.includes("resign") || termination.includes("abandon");
+
+  let winner = null;
+  if (result === "1-0") winner = "White";
+  if (result === "0-1") winner = "Black";
+  if (!winner && checkmate && finalMove) {
+    winner = moves.length % 2 === 1 ? "White" : "Black";
+  }
+
+  let title = null;
+  if (winner && checkmate) title = `${winner} wins by checkmate`;
+  else if (winner && onTime) title = `${winner} wins on time`;
+  else if (winner && resigned) title = `${winner} wins by resignation`;
+  else if (winner) title = `${winner} wins`;
+  else if (result === "1/2-1/2") title = "Game drawn";
+
+  if (!title) return null;
+
+  const moveNumber = finalMove ? Math.ceil(moves.length / 2) : null;
+  const notation = finalMove
+    ? `${moveNumber}${moves.length % 2 === 0 ? "..." : "."} ${finalSan}`
+    : null;
+
+  return {
+    title,
+    notation,
+    result,
+    reason: checkmate
+      ? "checkmate"
+      : onTime
+        ? "time"
+        : resigned
+          ? "resignation"
+          : result === "1/2-1/2"
+            ? "draw"
+            : "result",
+  };
+}

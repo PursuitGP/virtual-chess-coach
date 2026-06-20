@@ -78,6 +78,47 @@ def compute_eval_delta(prev_eval, current_eval):
 def side_name(color: bool) -> str:
     return "white" if color == chess.WHITE else "black"
 
+
+def adjacent_king_square_status(board, color):
+    king_square = board.king(color)
+    if king_square is None:
+        return {}
+
+    statuses = {}
+    for target in chess.SquareSet(chess.BB_KING_ATTACKS[king_square]):
+        target_name = chess.square_name(target)
+        occupant = board.piece_at(target)
+        if occupant and occupant.color == color:
+            statuses[target_name] = {
+                "status": "friendly_occupied",
+                "piece": chess.piece_name(occupant.piece_type),
+            }
+            continue
+        trial = board.copy(stack=False)
+        trial.remove_piece_at(king_square)
+        trial.remove_piece_at(target)
+        trial.set_piece_at(target, chess.Piece(chess.KING, color))
+        statuses[target_name] = {
+            "status": (
+                "attacked"
+                if trial.is_attacked_by(not color, target)
+                else "safe"
+            ),
+            "piece": (
+                chess.piece_name(occupant.piece_type) if occupant else None
+            ),
+        }
+    return dict(sorted(statuses.items()))
+
+
+def safe_adjacent_king_squares(board, color):
+    return [
+        square
+        for square, status in adjacent_king_square_status(board, color).items()
+        if status["status"] == "safe"
+    ]
+
+
 def make_motif(
     motif_id,
     name,
@@ -1009,21 +1050,109 @@ def f2_f7_weakness(board, move_number, eval_cp, prev_eval=None, **kwargs):
         if not p or p.piece_type != chess.PAWN or p.color != color:
             continue
         enemy = not color
-        # Check if enemy bishop+queen or knight+queen aiming there
         attackers = board.attackers(enemy, sq)
-        has_knight = any(board.piece_at(a).piece_type == chess.KNIGHT for a in attackers if board.piece_at(a))
-        has_bishop = any(board.piece_at(a).piece_type == chess.BISHOP for a in attackers if board.piece_at(a))
-        has_queen = any(board.piece_at(a).piece_type == chess.QUEEN for a in attackers if board.piece_at(a))
+        attacker_pieces = [
+            (attacker, board.piece_at(attacker))
+            for attacker in attackers
+            if board.piece_at(attacker)
+        ]
+        has_knight = any(
+            piece.piece_type == chess.KNIGHT
+            for _attacker, piece in attacker_pieces
+        )
+        has_bishop = any(
+            piece.piece_type == chess.BISHOP
+            for _attacker, piece in attacker_pieces
+        )
+        has_queen = any(
+            piece.piece_type == chess.QUEEN
+            for _attacker, piece in attacker_pieces
+        )
         if (has_knight and has_queen) or (has_knight and has_bishop):
+            target_square = chess.square_name(sq)
+            attacking_side = side_name(enemy).capitalize()
+            defending_side = side_name(color).capitalize()
+            attacker_details = [
+                {
+                    "piece": chess.piece_name(piece.piece_type),
+                    "square": chess.square_name(attacker),
+                }
+                for attacker, piece in attacker_pieces
+            ]
+            defender_details = [
+                {
+                    "piece": chess.piece_name(board.piece_at(defender).piece_type),
+                    "square": chess.square_name(defender),
+                }
+                for defender in board.attackers(color, sq)
+                if board.piece_at(defender)
+            ]
+            attacker_text = " and ".join(
+                f"{detail['piece']} on {detail['square']}"
+                for detail in attacker_details
+            )
+            explanation = (
+                f"{defending_side}'s {target_square} pawn is under pressure from "
+                f"{attacking_side}'s {attacker_text}. "
+                f"It has {len(attacker_details)} attacker"
+                f"{'' if len(attacker_details) == 1 else 's'} and "
+                f"{len(defender_details)} defender"
+                f"{'' if len(defender_details) == 1 else 's'}."
+            )
+            extra = {
+                "target_square": target_square,
+                "attackers": attacker_details,
+                "defenders": defender_details,
+            }
+
+            for attacker, piece in attacker_pieces:
+                if piece.piece_type != chess.KNIGHT:
+                    continue
+                threat_board = board.copy(stack=False)
+                threat_board.remove_piece_at(attacker)
+                threat_board.remove_piece_at(sq)
+                threat_board.set_piece_at(sq, chess.Piece(chess.KNIGHT, enemy))
+                fork_targets = []
+                for target in threat_board.attacks(sq):
+                    target_piece = threat_board.piece_at(target)
+                    if (
+                        target_piece
+                        and target_piece.color == color
+                        and target_piece.piece_type
+                        in (chess.QUEEN, chess.ROOK, chess.KING)
+                    ):
+                        fork_targets.append(
+                            {
+                                "piece": chess.piece_name(
+                                    target_piece.piece_type
+                                ),
+                                "square": chess.square_name(target),
+                            }
+                        )
+                if len(fork_targets) >= 2:
+                    threat_move_san = f"Nx{target_square}"
+                    target_text = " and ".join(
+                        f"{target['piece']} on {target['square']}"
+                        for target in fork_targets
+                    )
+                    extra["threat_move_san"] = threat_move_san
+                    extra["fork_targets"] = fork_targets
+                    explanation += (
+                        f" The threatened {threat_move_san} capture would fork "
+                        f"the {target_text}."
+                    )
+                    break
+
             motifs.append(
                 make_motif(
                     "f2_f7_weakness",
                     "F2/F7 Weakness",
-                    EX_F2_F7,
+                    explanation,
                     side=side_name(color),
                     severity="tactical",
                     eval_cp=eval_cp,
-                    eval_delta_cp=eval_delta
+                    eval_delta_cp=eval_delta,
+                    extra=extra,
                 )
             )
     return motifs
@@ -3142,45 +3271,66 @@ def fork_general(
 
             attacks = board.attacks(sq)
 
-            king_attacked = False
-            valuable_count = 0
+            targets = []
 
             for t in attacks:
                 p = board.piece_at(t)
                 if not p or p.color != enemy:
                     continue
 
-                if p.piece_type == chess.KING:
-                    king_attacked = True
-                elif p.piece_type in (chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT):
-                    valuable_count += 1
+                if p.piece_type in (
+                    chess.KING,
+                    chess.QUEEN,
+                    chess.ROOK,
+                    chess.BISHOP,
+                    chess.KNIGHT,
+                ):
+                    targets.append(
+                        {
+                            "piece": chess.piece_name(p.piece_type),
+                            "square": chess.square_name(t),
+                        }
+                    )
 
             # Fork conditions
-            if king_attacked and valuable_count >= 1:
-                motifs.append(
-                    make_motif(
-                        "fork",
-                        "Fork",
-                        EX_FORK,
-                        side=side_name(color),
-                        severity="tactical",
-                        eval_cp=eval_cp,
-                        eval_delta_cp=eval_delta,
-                        extra={"forking_piece": chess.square_name(sq)},
-                    )
+            king_attacked = any(
+                target["piece"] == "king" for target in targets
+            )
+            valuable_count = sum(
+                target["piece"] != "king" for target in targets
+            )
+            is_fork = (
+                king_attacked and valuable_count >= 1
+            ) or valuable_count >= 2
+            if is_fork:
+                attacker_name = chess.piece_name(piece.piece_type)
+                attacker_square = chess.square_name(sq)
+                target_text = " and ".join(
+                    f"the {target['piece']} on {target['square']}"
+                    for target in targets
                 )
-
-            elif valuable_count >= 2:
                 motifs.append(
                     make_motif(
                         "fork",
                         "Fork",
-                        EX_FORK,
+                        (
+                            f"The {attacker_name} on {attacker_square} attacks "
+                            f"{target_text} at the same time. The checked side "
+                            "must answer the king threat first when a king is "
+                            "one of the targets."
+                        ),
                         side=side_name(color),
                         severity="tactical",
                         eval_cp=eval_cp,
                         eval_delta_cp=eval_delta,
-                        extra={"forking_piece": chess.square_name(sq)},
+                        extra={
+                            "forking_piece": {
+                                "piece": attacker_name,
+                                "square": attacker_square,
+                            },
+                            "targets": targets,
+                            "includes_check": king_attacked,
+                        },
                     )
                 )
 
@@ -3294,8 +3444,26 @@ def detect_motifs(
         side = sf_raw.get("winner") or (
             "white" if mate_val > 0 else "black"
         )
+        winning_color = chess.WHITE if side == "white" else chess.BLACK
+        defending_color = not winning_color
+        defending_king_square = board.king(defending_color)
+        square_status = adjacent_king_square_status(board, defending_color)
+        safe_squares = [
+            square
+            for square, status in square_status.items()
+            if status["status"] == "safe"
+        ]
         n = abs(mate_val)
         is_checkmate = n == 0 and board.is_checkmate()
+        king_description = (
+            f"The defending king on "
+            f"{chess.square_name(defending_king_square)} has "
+            f"{len(safe_squares)} immediately safe adjacent square"
+            f"{'' if len(safe_squares) == 1 else 's'}"
+            f"{f': {', '.join(safe_squares)}' if safe_squares else ''}."
+            if defending_king_square is not None
+            else ""
+        )
 
         motifs.append(
             make_motif(
@@ -3306,12 +3474,25 @@ def detect_motifs(
                     "The game is over."
                     if is_checkmate
                     else f"There is a forced checkmate in {n} moves for {side}. "
-                    "All other strategic motifs are irrelevant when a forced win is on the board."
+                    f"{king_description} The supplied principal variation shows "
+                    "the concrete mating sequence."
                 ),
                 side=side,
                 severity="critical",
                 eval_cp=eval_cp,
                 eval_delta_cp=compute_eval_delta(prev_eval, eval_cp),
+                extra={
+                    "defending_king_square": (
+                        chess.square_name(defending_king_square)
+                        if defending_king_square is not None
+                        else None
+                    ),
+                    "safe_adjacent_squares": safe_squares,
+                    "safe_adjacent_square_count": len(safe_squares),
+                    "adjacent_square_status": square_status,
+                    "mate_line_uci": sf_raw.get("pv") or [],
+                    "mate_line_san": sf_raw.get("pv_san") or [],
+                },
             )
         )
         return publish_motifs(

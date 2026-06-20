@@ -103,6 +103,48 @@ class MotifConfidenceTests(unittest.TestCase):
         self.assertIn("absolute_pin", by_ply[12])
         self.assertEqual(by_ply[14], {"forced_mate"})
 
+        weakness = next(
+            motif
+            for motif in records[6]["motifs"]
+            if motif["id"] == "f2_f7_weakness"
+        )
+        self.assertEqual(weakness["extra"]["threat_move_san"], "Nxf7")
+        self.assertEqual(
+            {target["square"] for target in weakness["extra"]["fork_targets"]},
+            {"d8", "h8"},
+        )
+        self.assertIn("bishop on c4", weakness["explanation"])
+        self.assertIn("knight on g5", weakness["explanation"])
+
+        queen_fork = next(
+            motif
+            for motif in records[12]["motifs"]
+            if motif["id"] == "fork"
+        )
+        self.assertEqual(
+            queen_fork["extra"]["forking_piece"],
+            {"piece": "queen", "square": "f3"},
+        )
+        self.assertEqual(
+            {target["square"] for target in queen_fork["extra"]["targets"]},
+            {"d5", "f7"},
+        )
+        self.assertTrue(queen_fork["extra"]["includes_check"])
+
+        forced_mate = records[13]["motifs"][0]
+        self.assertEqual(
+            forced_mate["extra"]["defending_king_square"],
+            "g8",
+        )
+        self.assertEqual(
+            forced_mate["extra"]["safe_adjacent_square_count"],
+            0,
+        )
+        self.assertEqual(
+            forced_mate["extra"]["adjacent_square_status"]["h7"]["status"],
+            "friendly_occupied",
+        )
+
     def test_experimental_hanging_detector_is_suppressed(self):
         game = chess.pgn.read_game(io.StringIO("1. e4 e5 2. Nf3 *"))
         records, _total = _position_records(game, max_plies=3)

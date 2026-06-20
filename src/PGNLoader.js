@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Chess } from "chess.js";
 
 /**
@@ -7,11 +7,9 @@ import { Chess } from "chess.js";
  * - Paste PGN text and parse it through same normalization + compat pipeline
  * - Creates virtual File so backend can still receive `file`
  */
-export default function PGNLoader({ onParsed }) {
-  const [showNormalized, setShowNormalized] = useState(false);
+export default function PGNLoader({ disabled = false, onParsed }) {
+  const inputRef = useRef(null);
   const [error, setError] = useState("");
-  const [headers, setHeaders] = useState(null);
-  const [normalizedText, setNormalizedText] = useState("");
   const [pastedText, setPastedText] = useState("");
 
   const KEEP_TAGS = new Set([
@@ -31,6 +29,7 @@ export default function PGNLoader({ onParsed }) {
     "UTCDate",
     "UTCTime",
     "Variant",
+    "Termination",
   ]);
 
   // ---------------------- helpers ----------------------
@@ -106,10 +105,11 @@ export default function PGNLoader({ onParsed }) {
       .replace(/\s{2,}/g, " ")
       .trim();
 
-    const res = body.match(/\b(1-0|0-1|1\/2-1\/2)\b/g);
+    const resultPattern = /(?:\b(?:1-0|0-1|1\/2-1\/2)\b|\*)/g;
+    const res = body.match(resultPattern);
     if (res) {
       const last = res[res.length - 1];
-      body = body.replace(/\b(1-0|0-1|1\/2-1\/2)\b/g, "").trim();
+      body = body.replace(resultPattern, "").trim();
       body = (body + " " + last).trim();
     }
 
@@ -130,7 +130,9 @@ export default function PGNLoader({ onParsed }) {
     });
 
     let movetext = stripCommentsRAVNAG(body);
-    movetext = movetext.replace(/\b(1-0|0-1|1\/2-1\/2)\b/g, " ").trim();
+    movetext = movetext
+      .replace(/(?:\b(?:1-0|0-1|1\/2-1\/2)\b|\*)/g, " ")
+      .trim();
     movetext = movetext.replace(/\b\d+\.(\.\.)?/g, " ");
     movetext = movetext.replace(/\s{2,}/g, " ").trim();
 
@@ -173,14 +175,12 @@ export default function PGNLoader({ onParsed }) {
   // ------------------ UI handlers ------------------
   function processPGN(raw, filename) {
     const cleaned = normalizePGN(raw);
-    setNormalizedText(cleaned);
 
     try {
       const { headers: hdrs, moves } = tryParseCompat(cleaned);
       const normalizedFile = new File([cleaned], filename, {
         type: "application/x-chess-pgn",
       });
-      setHeaders(hdrs);
       setError("");
       onParsed?.({
         headers: hdrs,
@@ -211,7 +211,6 @@ export default function PGNLoader({ onParsed }) {
     reader.readAsText(file);
   }
 
-  // ------------------ NEW: Paste PGN ------------------
   function handlePasteParse() {
     if (!pastedText.trim()) {
       setError("Paste a PGN first.");
@@ -234,132 +233,64 @@ export default function PGNLoader({ onParsed }) {
     }
   }
 
-  // ------------------ Copy PGN ------------------
-  const [copied, setCopied] = useState(false);
-
-  function handleCopyPGN() {
-    const text = normalizedText;
-    if (!text) return;
-
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard
-        .writeText(text)
-        .then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        })
-        .catch(fallbackCopy);
-    } else {
-      fallbackCopy();
-    }
-
-    function fallbackCopy() {
-      try {
-        const ta = document.createElement("textarea");
-        ta.value = text;
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        document.body.removeChild(ta);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      } catch (err) {
-        console.error("Clipboard copy failed:", err);
-        alert("Could not copy PGN to clipboard.");
-      }
-    }
-  }
-
-  // --------------------------------------------------
   return (
-    <div className="pgn-loader">
-      {/* FILE UPLOAD */}
-      <div className="pgn-actions">
-        <input
-          type="file"
-          accept=".pgn"
-          onChange={handleFile}
-          className="pgn-upload"
-        />
-        <button type="button" className="btn ghost" onClick={handleLoadExample}>
-          Try example game
-        </button>
+    <div className="pgn-loader welcome-pgn-loader">
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".pgn,application/x-chess-pgn"
+        onChange={handleFile}
+        className="visually-hidden"
+        disabled={disabled}
+      />
+      <button
+        type="button"
+        className="upload-action"
+        onClick={() => inputRef.current?.click()}
+        disabled={disabled}
+      >
+        <span className="upload-icon" aria-hidden="true">
+          ↑
+        </span>
+        <span>
+          <strong>Upload your PGN</strong>
+          <small>Choose a .pgn file from your device</small>
+        </span>
+      </button>
+
+      <div className="intake-divider">
+        <span>or paste the PGN</span>
       </div>
 
-      {error && <p className="error">{error}</p>}
+      <textarea
+        rows={7}
+        aria-label="Paste PGN text"
+        placeholder={'[White "Player"]\n[Black "Opponent"]\n\n1. e4 e5 2. Nf3 Nc6'}
+        value={pastedText}
+        onChange={(event) => setPastedText(event.target.value)}
+        disabled={disabled}
+      />
 
-      {/* NEW: Paste PGN manually */}
-      <div style={{ marginTop: 16 }}>
-        <label>
-          <strong>Or paste PGN text:</strong>
-        </label>
-        <textarea
-          rows={6}
-          placeholder={'[White "Player"]\n[Black "Opponent"]\n\n1. e4 e5 2. Nf3 Nc6'}
-          style={{
-            width: "100%",
-            marginTop: 6,
-            fontFamily: "ui-monospace, monospace",
-            padding: 8,
-          }}
-          value={pastedText}
-          onChange={(e) => setPastedText(e.target.value)}
-        />
-
+      <div className="paste-actions">
         <button
-          className="btn"
+          type="button"
+          className="primary-action"
           onClick={handlePasteParse}
-          disabled={!pastedText.trim()}
-          style={{ marginTop: 8 }}
+          disabled={disabled || !pastedText.trim()}
         >
-          Parse Pasted PGN
+          Analyze pasted game
+        </button>
+        <button
+          type="button"
+          className="ghost-action"
+          onClick={handleLoadExample}
+          disabled={disabled}
+        >
+          Try an example
         </button>
       </div>
 
-      {/* Normalized PGN display */}
-      <div style={{ marginTop: 12 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
-          <label style={{ fontWeight: 500 }}>Normalized PGN</label>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <button
-              className="btn ghost"
-              onClick={() => setShowNormalized((s) => !s)}
-            >
-              {showNormalized ? "▾ Hide" : "▸ Show"}
-            </button>
-
-            <button
-              className={`btn ${copied ? "copied" : ""}`}
-              onClick={handleCopyPGN}
-              disabled={!normalizedText}
-            >
-              {copied ? "✔ Copied!" : "📋 Copy"}
-            </button>
-          </div>
-        </div>
-
-        {showNormalized && (
-          <textarea
-            readOnly
-            value={normalizedText}
-            style={{
-              width: "100%",
-              height: 140,
-              marginTop: 6,
-              resize: "vertical",
-              fontFamily: "ui-monospace, monospace",
-            }}
-          />
-        )}
-      </div>
+      {error && <p className="notice error">{error}</p>}
     </div>
   );
 }

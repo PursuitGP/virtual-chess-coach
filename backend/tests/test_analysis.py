@@ -172,6 +172,100 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(evaluation["display"], "Checkmate")
         self.assertEqual(evaluation["winner"], "black")
 
+    def test_decision_context_distinguishes_best_defense_from_mate_blunder(self):
+        game = chess.pgn.read_game(
+            io.StringIO(
+                "1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 d5 "
+                "5. exd5 Nxd5 6. Nxf7 Kxf7 7. Qf3+ Kg8 *"
+            )
+        )
+        records, _total = analysis._position_records(game, max_plies=20)
+        initial = {
+            "evaluation": {
+                "type": "cp",
+                "value": 20,
+                "pawns": 0.2,
+                "display": "+0.20",
+            },
+            "top_lines": [
+                {"moves_uci": ["e2e4"], "moves_san": ["e4"]}
+            ],
+        }
+        for index, record in enumerate(records):
+            next_record = records[index + 1] if index + 1 < len(records) else None
+            record["stockfish"] = {
+                "evaluation": {
+                    "type": "cp",
+                    "value": 20,
+                    "pawns": 0.2,
+                    "display": "+0.20",
+                },
+                "mover_loss_cp": 0,
+                "top_lines": [
+                    {
+                        "moves_uci": (
+                            [next_record["played_move"]["uci"]]
+                            if next_record
+                            else []
+                        ),
+                        "moves_san": (
+                            [next_record["played_move"]["san"]]
+                            if next_record
+                            else []
+                        ),
+                    }
+                ],
+            }
+            record["motifs"] = []
+
+        records[11]["stockfish"]["evaluation"] = {
+            "type": "cp",
+            "value": 95,
+            "pawns": 0.95,
+            "display": "+0.95",
+        }
+        records[11]["stockfish"]["top_lines"] = [
+            {
+                "moves_uci": ["d1f3", "f7e6"],
+                "moves_san": ["Qf3+", "Ke6"],
+            }
+        ]
+        records[12]["stockfish"]["evaluation"] = {
+            "type": "cp",
+            "value": 105,
+            "pawns": 1.05,
+            "display": "+1.05",
+        }
+        records[12]["stockfish"]["top_lines"] = [
+            {
+                "moves_uci": ["f7e6", "b1c3"],
+                "moves_san": ["Ke6", "Nc3"],
+            }
+        ]
+        records[13]["stockfish"]["evaluation"] = {
+            "type": "mate",
+            "value": 3,
+            "pawns": None,
+            "display": "M3",
+            "winner": "white",
+        }
+        records[13]["stockfish"]["mover_loss_cp"] = None
+
+        analysis.add_decision_context(records, initial)
+
+        qf3 = records[12]["decision_context"]
+        self.assertTrue(qf3["played_matches_engine_first"])
+        self.assertEqual(qf3["assessment_after"]["classification"], "slight_edge")
+        self.assertEqual(qf3["material_after"]["leader"], "black")
+        self.assertEqual(qf3["material_after"]["advantage_pawns"], 2)
+
+        kg8 = records[13]["decision_context"]
+        self.assertFalse(kg8["played_matches_engine_first"])
+        self.assertEqual(kg8["engine_first_choice"]["san"], "Ke6")
+        self.assertEqual(kg8["move_quality"], "allows_forced_mate")
+        self.assertEqual(kg8["assessment_before"]["classification"], "slight_edge")
+        self.assertEqual(kg8["assessment_after"]["classification"], "forced_mate")
+
     def test_total_stockfish_budget_bounds_long_openings(self):
         pgn = (ROOT / "pgns" / "immortal_game_clean.pgn").read_bytes()
         result = self.build(pgn, max_plies=20)

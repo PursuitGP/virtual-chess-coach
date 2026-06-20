@@ -33,6 +33,7 @@ PGN
 ### PGN intake and review
 
 - Upload a `.pgn` file or paste PGN text
+- Recreate a game manually on a legal-move board and submit the generated PGN
 - Normalize common PGN formatting problems
 - Display game metadata and replay every legal move on a Chessground board
 - Navigate with buttons or arrow, Home, and End keys
@@ -75,6 +76,8 @@ The Fried Liver line `1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 d5 5. exd5 Nxd5 6. N
 - Uploading a game automatically runs evidence collection followed by AI coaching
 - Perspective can be White, Black, or both
 - Gemini must return one validated object for every analyzed ply
+- Explanations target four to six position-specific sentences and receive the
+  previous position, the current evidence, and the opponent's next played move
 - Every explanation identifies the Stockfish, Lichess, or motif evidence it used
 - Misaligned moves, missing plies, malformed JSON, and invented evidence references are rejected
 - Failed AI requests preserve the completed analysis and expose a retry action
@@ -174,6 +177,27 @@ npm start
 ```
 
 Create React App proxies `/api` requests to `http://127.0.0.1:5050`. Port 5050 avoids the common macOS AirPlay Receiver/Control Center collision on port 5000. Set `REACT_APP_API_BASE_URL` only when the frontend and backend intentionally use different origins.
+
+### Temporary friend testing
+
+For friends on the same Wi-Fi, build the frontend and serve the complete app
+from Gunicorn:
+
+```bash
+npm run build
+.venv/bin/gunicorn --bind 0.0.0.0:5050 --workers 1 --threads 2 \
+  --timeout 180 backend.app:app
+```
+
+Share `http://YOUR_MAC_LAN_IP:5050` while the process is running. For friends
+outside the local network, prefer Railway. A short-lived Cloudflare or ngrok
+tunnel can be used for a supervised test, but the random URL should not be
+posted publicly because visitors consume the owner's Gemini quota.
+
+The application currently allows 20 analyses and 5 Gemini coaching requests per
+detected IP per hour. Gemini's own limits are project-wide and must be checked
+in Google AI Studio. One Gunicorn worker with two threads is appropriate for a
+few testers, not a public load test.
 
 ### Docker
 
@@ -306,7 +330,7 @@ The service is deployment-ready at the repository level, but this README does no
 - Analysis is intentionally opening-focused and defaults to the first 20 plies.
 - Published motifs are confidence-gated handcrafted heuristics. They can still miss concepts, while experimental detectors remain withheld pending fixture-based validation.
 - Lichess statistics may be sparse or unavailable for unusual positions.
-- Opening descriptions are short project-authored summaries for common families; Lichess supplies the opening name and ECO code but not a stable description field.
+- Opening descriptions are short project-authored summaries for common families; Lichess supplies the opening name and ECO code but not a stable description field. A future low-latency extension could sync annotations from a project-owned Lichess study at build time rather than scraping arbitrary web pages at runtime.
 - Stockfish lines are converted to SAN for display, while UCI remains in the evidence package for exact machine alignment.
 - Gemini coaching can still be incorrect despite grounding and validation. It is educational assistance, not authoritative analysis.
 - Rate limiting and coaching cache are process-local; horizontal scaling would require shared infrastructure.

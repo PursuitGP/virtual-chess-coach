@@ -12,6 +12,13 @@ from urllib.parse import quote
 
 
 OPENING_CONTEXT = {
+    "Italian Game: Two Knights Defense, Knight Attack": (
+        "After Black develops with Nf6, White's Ng5 is the Knight Attack and "
+        "concentrates the bishop and knight on f7. Black normally needs an "
+        "immediate, concrete response to the center and the f7 pressure; the "
+        "supplied engine line and opening statistics should determine the exact "
+        "continuation in this position."
+    ),
     "Italian Game": (
         "An open-game family built around rapid development, central influence, "
         "and pressure on the f7 square. Typical plans depend heavily on whether "
@@ -94,11 +101,15 @@ def context_for_opening(opening: dict | None) -> dict | None:
 
     description = None
     matched_family = None
-    for family, family_description in OPENING_CONTEXT.items():
-        if name == family or name.startswith(f"{family}:"):
-            matched_family = family
-            description = family_description
-            break
+    if name in OPENING_CONTEXT:
+        matched_family = name
+        description = OPENING_CONTEXT[name]
+    else:
+        for family, family_description in OPENING_CONTEXT.items():
+            if name.startswith(f"{family}:"):
+                matched_family = family
+                description = family_description
+                break
 
     slug = quote(name.replace(" ", "_"), safe="_-")
     return {
