@@ -3291,15 +3291,23 @@ def detect_motifs(
     # ---------------------------------------------------
     if sf_raw and sf_raw.get("type") == "mate":
         mate_val = sf_raw.get("value", 0)
-        side = "white" if mate_val > 0 else "black"
+        side = sf_raw.get("winner") or (
+            "white" if mate_val > 0 else "black"
+        )
         n = abs(mate_val)
+        is_checkmate = n == 0 and board.is_checkmate()
 
         motifs.append(
             make_motif(
                 "forced_mate",
-                f"Forced Mate in {n}",
-                f"There is a forced checkmate in {n} moves for {side}. "
-                "All other strategic motifs are irrelevant when a forced win is on the board.",
+                "Checkmate" if is_checkmate else f"Forced Mate in {n}",
+                (
+                    f"{side.capitalize()} has delivered checkmate. "
+                    "The game is over."
+                    if is_checkmate
+                    else f"There is a forced checkmate in {n} moves for {side}. "
+                    "All other strategic motifs are irrelevant when a forced win is on the board."
+                ),
                 side=side,
                 severity="critical",
                 eval_cp=eval_cp,
@@ -3338,4 +3346,3 @@ def detect_motifs(
         motifs,
         include_experimental=include_experimental,
     )
-

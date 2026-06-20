@@ -2,7 +2,10 @@ import {
   buildExplanationMap,
   evaluationForBar,
   evaluationLabel,
+  fullMoveCount,
+  movePositionLabel,
   pointColor,
+  readJsonResponse,
 } from "./analysisUtils";
 
 test("formats centipawn and mate evaluations for the board", () => {
@@ -41,4 +44,20 @@ test("keys validated explanations by ply", () => {
   ];
   const result = buildExplanationMap(explanations);
   expect(result.get(2).explanation).toBe("second");
+});
+
+test("formats internal plies as chess full moves", () => {
+  expect(fullMoveCount(19)).toBe(10);
+  expect(movePositionLabel(0, 0)).toBe("Start position · no game loaded");
+  expect(movePositionLabel(0, 19)).toBe("Start position · 10 moves");
+  expect(movePositionLabel(1, 19)).toBe("Move 1 · White · 1/10");
+  expect(movePositionLabel(2, 19)).toBe("Move 1 · Black · 1/10");
+  expect(movePositionLabel(19, 19)).toBe("Move 10 · White · 10/10");
+});
+
+test("reports empty API responses without a JSON parser error", async () => {
+  const response = { text: async () => "" };
+  await expect(
+    readJsonResponse(response, "Analysis failed.")
+  ).rejects.toThrow("API returned an empty response");
 });

@@ -8,7 +8,7 @@ import { Chess } from "chess.js";
  * - Creates virtual File so backend can still receive `file`
  */
 export default function PGNLoader({ onParsed }) {
-  const [showNormalized, setShowNormalized] = useState(true);
+  const [showNormalized, setShowNormalized] = useState(false);
   const [error, setError] = useState("");
   const [headers, setHeaders] = useState(null);
   const [normalizedText, setNormalizedText] = useState("");

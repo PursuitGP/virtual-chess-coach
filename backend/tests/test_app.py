@@ -88,6 +88,10 @@ class AppTests(unittest.TestCase):
         )
         self.assertEqual(analyze.call_args.kwargs["stockfish_multipv"], 1)
         self.assertEqual(analyze.call_args.kwargs["stockfish_hash_mb"], 64)
+        self.assertEqual(
+            analyze.call_args.kwargs["stockfish_total_seconds"],
+            16.0,
+        )
         explain.assert_not_called()
 
     def test_oversized_upload_is_rejected(self):

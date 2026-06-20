@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Chessground from "react-chessground";
 import "chessground/assets/chessground.base.css";
 import "chessground/assets/chessground.brown.css";
@@ -22,7 +28,10 @@ import {
   buildExplanationMap,
   evaluationForBar,
   evaluationLabel,
+  fullMoveCount,
+  movePositionLabel,
   pointColor,
+  readJsonResponse,
 } from "./analysisUtils";
 import "./App.css";
 
@@ -85,6 +94,14 @@ function formatPercent(value) {
   return typeof value === "number" ? `${value.toFixed(1)}%` : "—";
 }
 
+function hasCompleteEvidence(analysis) {
+  return Boolean(
+    analysis?.providers?.stockfish?.available &&
+      analysis?.providers?.lichess?.available &&
+      analysis?.providers?.motifs?.available
+  );
+}
+
 function LichessMove({ label, move }) {
   if (!move) {
     return (
@@ -141,6 +158,11 @@ export default function App() {
   const [coachingLoading, setCoachingLoading] = useState(false);
   const [coachingError, setCoachingError] = useState(null);
   const [health, setHealth] = useState(null);
+  const [reviewElapsed, setReviewElapsed] = useState(0);
+
+  const reviewRef = useRef(null);
+  const requestIdRef = useRef(0);
+  const reviewLoading = analysisLoading || coachingLoading;
 
   const boardSize = useBoardSize();
   const fen = game.fen();
@@ -196,12 +218,27 @@ export default function App() {
 
   useEffect(() => {
     fetch(apiUrl("/api/health"))
-      .then((response) => response.json())
+      .then((response) =>
+        readJsonResponse(response, "The API health check failed.")
+      )
       .then(setHealth)
       .catch(() => setHealth(null));
   }, []);
 
+  useEffect(() => {
+    if (!reviewLoading) {
+      setReviewElapsed(0);
+      return undefined;
+    }
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+      setReviewElapsed(Math.floor((Date.now() - started) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [reviewLoading]);
+
   function resetReview() {
+    requestIdRef.current += 1;
     setGame(new Chess());
     setPgnMoves([]);
     setPgnHeaders(null);
@@ -210,6 +247,7 @@ export default function App() {
     setAnalysisError(null);
     setCoaching(null);
     setCoachingError(null);
+    setPgnOpen(true);
   }
 
   function moveBoard(from, to) {
@@ -220,6 +258,8 @@ export default function App() {
   }
 
   async function onPGNParsed({ headers, moves, file }) {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     setPgnHeaders(headers || {});
     setPgnMoves(Array.isArray(moves) ? moves : []);
     setGame(new Chess());
@@ -229,6 +269,8 @@ export default function App() {
     setCoachingError(null);
     setAnalysisError(null);
     setAnalysisLoading(true);
+    setPgnOpen(false);
+    window.setTimeout(() => reviewRef.current?.focus(), 0);
 
     const formData = new FormData();
     formData.append("file", file);
@@ -239,22 +281,47 @@ export default function App() {
         method: "POST",
         body: formData,
       });
-      const data = await response.json();
+      const data = await readJsonResponse(
+        response,
+        "The PGN could not be analyzed."
+      );
       if (!response.ok) {
         throw new Error(data.error || "The PGN could not be analyzed.");
       }
+      if (requestId !== requestIdRef.current) return;
       setAnalysis(data);
       setPgnHeaders(data.metadata || headers || {});
       goTo(0);
-    } catch (error) {
-      setAnalysisError(error.message || "The PGN could not be analyzed.");
-    } finally {
       setAnalysisLoading(false);
+
+      if (!hasCompleteEvidence(data)) {
+        setCoachingError({
+          message:
+            "AI coaching requires complete Stockfish, Lichess, and motif evidence.",
+          retryable: false,
+          code: "evidence_incomplete",
+        });
+        return;
+      }
+
+      await generateCoaching(data, perspective, requestId);
+    } catch (error) {
+      if (requestId !== requestIdRef.current) return;
+      setAnalysisError(error.message || "The PGN could not be analyzed.");
+      setPgnOpen(true);
+    } finally {
+      if (requestId === requestIdRef.current) {
+        setAnalysisLoading(false);
+      }
     }
   }
 
-  async function generateCoaching() {
-    if (!analysis) return;
+  async function generateCoaching(
+    analysisPackage = analysis,
+    requestedPerspective = perspective,
+    requestId = requestIdRef.current
+  ) {
+    if (!analysisPackage) return;
     setCoachingLoading(true);
     setCoachingError(null);
     setCoaching(null);
@@ -263,9 +330,15 @@ export default function App() {
       const response = await fetch(apiUrl("/api/explain"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ analysis, perspective }),
+        body: JSON.stringify({
+          analysis: analysisPackage,
+          perspective: requestedPerspective,
+        }),
       });
-      const data = await response.json();
+      const data = await readJsonResponse(
+        response,
+        "AI coaching could not be generated."
+      );
       if (!response.ok) {
         const error = new Error(
           data.error || "AI coaching could not be generated."
@@ -274,15 +347,28 @@ export default function App() {
         error.code = data.code;
         throw error;
       }
+      if (requestId !== requestIdRef.current) return;
       setCoaching(data);
     } catch (error) {
+      if (requestId !== requestIdRef.current) return;
       setCoachingError({
         message: error.message || "AI coaching could not be generated.",
         retryable: error.retryable !== false,
         code: error.code,
       });
     } finally {
-      setCoachingLoading(false);
+      if (requestId === requestIdRef.current) {
+        setCoachingLoading(false);
+      }
+    }
+  }
+
+  function changePerspective(value) {
+    setPerspective(value);
+    setCoaching(null);
+    setCoachingError(null);
+    if (analysis && hasCompleteEvidence(analysis)) {
+      generateCoaching(analysis, value);
     }
   }
 
@@ -353,10 +439,8 @@ export default function App() {
   const barHeight = Math.min(100, Math.max(0, 50 + barEvaluation * 5));
   const aiAvailable = health?.capabilities?.gemini?.ready;
   const lichessConfigured = health?.capabilities?.lichess?.configured;
-  const evidenceComplete =
-    analysis?.providers?.stockfish?.available &&
-    analysis?.providers?.lichess?.available &&
-    analysis?.providers?.motifs?.available;
+  const evidenceComplete = hasCompleteEvidence(analysis);
+  const totalFullMoves = fullMoveCount(pgnMoves.length);
 
   return (
     <main className="app-shell">
@@ -380,7 +464,11 @@ export default function App() {
 
       <section className="workspace">
         <div className="board-column">
-          <div className="panel board-panel">
+          <div
+            className="panel board-panel"
+            ref={reviewRef}
+            tabIndex={-1}
+          >
             <div className="toolbar">
               <button
                 type="button"
@@ -413,7 +501,7 @@ export default function App() {
                 ◀
               </button>
               <span className="move-counter">
-                {plyIndex}/{pgnMoves.length}
+                {movePositionLabel(plyIndex, pgnMoves.length)}
               </span>
               <button
                 type="button"
@@ -525,8 +613,8 @@ export default function App() {
                 <PGNLoader onParsed={onPGNParsed} />
                 {analysisLoading && (
                   <div className="notice working">
-                    Building evidence with Stockfish, Lichess, and motif
-                    detection…
+                    Reviewing {totalFullMoves} chess moves with Stockfish,
+                    Lichess, and motif detection…
                   </div>
                 )}
                 {analysisError && (
@@ -534,8 +622,13 @@ export default function App() {
                 )}
                 {analysis && !analysisLoading && (
                   <div className="notice success">
-                    Analyzed {analysis.analyzed_plies} of {analysis.total_plies}{" "}
-                    plies. AI coaching has not been generated yet.
+                    Analyzed {fullMoveCount(analysis.analyzed_plies)} of{" "}
+                    {fullMoveCount(analysis.total_plies)} chess moves.
+                    {coachingLoading
+                      ? " AI coaching is being generated automatically."
+                      : coaching
+                        ? " Coaching is ready."
+                        : ""}
                   </div>
                 )}
                 {analysis?.warnings?.map((warning) => (
@@ -557,7 +650,9 @@ export default function App() {
               </div>
               {currentRecord && (
                 <span className="ply-badge">
-                  Ply {currentRecord.ply}: {currentRecord.played_move.san}
+                  Move {currentRecord.fullmove_number} ·{" "}
+                  {currentRecord.side === "white" ? "White" : "Black"}:{" "}
+                  {currentRecord.played_move.san}
                 </span>
               )}
             </div>
@@ -721,34 +816,32 @@ export default function App() {
             <select
               id="perspective"
               value={perspective}
-              onChange={(event) => {
-                setPerspective(event.target.value);
-                setCoaching(null);
-                setCoachingError(null);
-              }}
+              onChange={(event) => changePerspective(event.target.value)}
+              disabled={analysisLoading || coachingLoading}
             >
               <option value="both">Both sides</option>
               <option value="white">White</option>
               <option value="black">Black</option>
             </select>
 
-            <button
-              type="button"
-              className="primary-action"
-              onClick={generateCoaching}
-              disabled={
-                !analysis ||
-                !evidenceComplete ||
-                coachingLoading ||
-                aiAvailable === false
-              }
-            >
-              {coachingLoading
-                ? "Gemini is synthesizing evidence…"
-                : coaching
-                  ? "Regenerate AI coaching"
-                  : "Generate AI coaching"}
-            </button>
+            {analysis && (
+              <button
+                type="button"
+                className="primary-action"
+                onClick={() => generateCoaching()}
+                disabled={
+                  !evidenceComplete ||
+                  coachingLoading ||
+                  aiAvailable === false
+                }
+              >
+                {coachingLoading
+                  ? "Gemini is synthesizing evidence…"
+                  : coaching
+                    ? "Regenerate AI coaching"
+                    : "Retry AI coaching"}
+              </button>
+            )}
 
             {aiAvailable === false && (
               <div className="notice warning">
@@ -769,7 +862,7 @@ export default function App() {
                 <strong>AI coaching was not generated.</strong>
                 <span>{coachingError.message}</span>
                 {coachingError.retryable && (
-                  <button type="button" onClick={generateCoaching}>
+                  <button type="button" onClick={() => generateCoaching()}>
                     Retry coaching
                   </button>
                 )}
@@ -786,8 +879,7 @@ export default function App() {
 
             {!coaching && !coachingLoading && !coachingError && (
               <div className="empty-state">
-                Analysis evidence is generated first. Gemini coaching runs only
-                when you request it.
+                Upload a game to run the complete review automatically.
               </div>
             )}
 
@@ -800,8 +892,8 @@ export default function App() {
             {currentExplanation && (
               <article className="coaching-copy">
                 <p className="coach-move">
-                  Ply {currentExplanation.ply} · {currentExplanation.side} ·{" "}
-                  {currentExplanation.move}
+                  Move {Math.ceil(currentExplanation.ply / 2)} ·{" "}
+                  {currentExplanation.side} · {currentExplanation.move}
                 </p>
                 <p>{currentExplanation.explanation}</p>
                 <div className="lesson">
@@ -828,11 +920,39 @@ export default function App() {
               {pairs.length ? (
                 <table>
                   <tbody>
-                    {pairs.map((pair) => (
+                    {pairs.map((pair, pairIndex) => (
                       <tr key={pair.number}>
                         <td>{pair.number}.</td>
-                        <td>{pair.white}</td>
-                        <td>{pair.black}</td>
+                        <td>
+                          {pair.white && (
+                            <button
+                              type="button"
+                              className={
+                                plyIndex === pairIndex * 2 + 1
+                                  ? "history-move active"
+                                  : "history-move"
+                              }
+                              onClick={() => goTo(pairIndex * 2 + 1)}
+                            >
+                              {pair.white}
+                            </button>
+                          )}
+                        </td>
+                        <td>
+                          {pair.black && (
+                            <button
+                              type="button"
+                              className={
+                                plyIndex === pairIndex * 2 + 2
+                                  ? "history-move active"
+                                  : "history-move"
+                              }
+                              onClick={() => goTo(pairIndex * 2 + 2)}
+                            >
+                              {pair.black}
+                            </button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -844,6 +964,34 @@ export default function App() {
           </section>
         </aside>
       </section>
+
+      {reviewLoading && (
+        <div className="review-overlay" role="status" aria-live="polite">
+          <div className="review-card">
+            <div className="review-spinner" />
+            <p className="eyebrow">Automatic game review</p>
+            <h2>
+              {analysisLoading
+                ? `Analyzing ${totalFullMoves} chess moves`
+                : "Writing your coaching"}
+            </h2>
+            <p>
+              {analysisLoading
+                ? "Stockfish, Lichess, and the motif engine are building position evidence."
+                : "Gemini is turning the completed evidence into move-by-move instruction."}
+            </p>
+            <div className="review-steps">
+              <span className={!analysisLoading ? "done" : "active"}>
+                1. Chess evidence
+              </span>
+              <span className={coachingLoading ? "active" : ""}>
+                2. AI coaching
+              </span>
+            </div>
+            <small>{reviewElapsed}s elapsed · please keep this tab open</small>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

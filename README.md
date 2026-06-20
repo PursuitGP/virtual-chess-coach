@@ -53,9 +53,9 @@ For each analyzed ply, the backend records:
 
 Theory classification is calculated against the position before the move was played. “Novelty” is always labeled as a candidate: absence from the selected sample does not prove historical novelty. Lichess statistics are treated as descriptions of human behavior, never as objective evaluations.
 
-Duplicate Lichess position queries are cached and made sequentially in accordance with Lichess API guidance. The Lichess fetch stream runs concurrently with one bounded Stockfish process, so network latency overlaps the engine batch without spawning an unsafe number of engine workers. A per-database circuit breaker stops an outage from turning into dozens of repeated timeouts. Stockfish retains the game history needed for repetition-aware analysis.
+Duplicate Lichess position queries are cached. The master and aggregate-player databases use two bounded request streams while each database remains chronological, and both run concurrently with one bounded Stockfish process. A per-database circuit breaker stops an outage or exhausted sample from turning into dozens of repeated calls. Stockfish retains the game history needed for repetition-aware analysis.
 
-The default opening window is 20 plies—ten White-and-Black move pairs—and therefore requires 21 engine searches including the initial position. Stockfish stops when it reaches either target depth 24 or the 1.25-second per-position ceiling. The API records the actual depth, selective depth, nodes, and search time instead of implying that the target depth was always reached. MultiPV defaults to one because official Stockfish guidance recommends it for the strongest best-line search; alternative human continuations come from Lichess.
+The default opening window is 20 plies—ten White-and-Black move pairs—and therefore requires 21 engine searches including the initial position. Stockfish stops when it reaches either target depth 24 or the 1.25-second per-position ceiling. A 16-second total engine budget automatically lowers the per-position ceiling for longer opening windows. The API records the actual depth, selective depth, nodes, and search time instead of implying that the target depth was always reached. MultiPV defaults to one because official Stockfish guidance recommends it for the strongest best-line search; alternative human continuations come from Lichess.
 
 The production image builds a pinned Stockfish 18 binary from the official source tag. Runtime defaults use one engine thread and 64 MB of hash so the service remains bounded on a small portfolio deployment.
 
@@ -72,7 +72,7 @@ The Fried Liver line `1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 d5 5. exd5 Nxd5 6. N
 
 ### AI coaching
 
-- Coaching runs only after the user explicitly requests it
+- Uploading a game automatically runs evidence collection followed by AI coaching
 - Perspective can be White, Black, or both
 - Gemini must return one validated object for every analyzed ply
 - Every explanation identifies the Stockfish, Lichess, or motif evidence it used
@@ -82,6 +82,10 @@ The Fried Liver line `1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 d5 5. exd5 Nxd5 6. N
 - The LLM is not allowed to browse the internet; opening context and recommendations must come from the submitted evidence
 
 There is intentionally no deterministic prose fallback. Raw engine output and statistics remain inspectable, but they are not mislabeled as completed coaching.
+
+The browser chains the two public API stages automatically and presents one
+review loading screen. `/api/analyze` still remains independent from Gemini so
+completed chess evidence can be preserved and retried if `/api/explain` fails.
 
 ## Architecture
 
@@ -119,7 +123,7 @@ Browser ──> Gunicorn / Flask ──> Stockfish process
 | Engine | Stockfish 18 in production |
 | Chess data | Lichess Opening Explorer |
 | Domain logic | python-chess and a custom motif engine |
-| AI synthesis | Google GenAI SDK with Gemini |
+| AI synthesis | Google GenAI SDK with Gemini 3.1 Flash Lite by default |
 | Deployment | Docker and Railway configuration |
 | Verification | Python `unittest`, Jest, production build, GitHub Actions |
 
@@ -169,7 +173,7 @@ npm ci
 npm start
 ```
 
-Create React App proxies `/api` requests to `http://127.0.0.1:5000`. Set `REACT_APP_API_BASE_URL` only when the frontend and backend intentionally use different origins.
+Create React App proxies `/api` requests to `http://127.0.0.1:5050`. Port 5050 avoids the common macOS AirPlay Receiver/Control Center collision on port 5000. Set `REACT_APP_API_BASE_URL` only when the frontend and backend intentionally use different origins.
 
 ### Docker
 
@@ -220,9 +224,10 @@ Accepts:
 Public defaults are intentionally conservative:
 
 - Maximum upload: 256 KB
-- Maximum analysis: 20 plies
+- Maximum analysis: 20 plies (ten complete White-and-Black move pairs)
 - Stockfish 18 target depth: 24
 - Per-position engine ceiling: 1.25 seconds
+- Total Stockfish budget per review: 16 seconds
 - Stockfish MultiPV: 1
 - Stockfish resources: 1 thread and 64 MB hash
 - One Gunicorn worker with two request threads
@@ -262,16 +267,19 @@ minimum/median/maximum depth, search time, and total wall time. Re-run it on the
 deployment machine because depth reached within a time limit depends on
 available CPU.
 
-Reference measurement on the maintainer's Apple Silicon development machine
-with Stockfish 18:
+Representative measurements on the maintainer's Apple Silicon development
+machine with Stockfish 18:
 
-| Workload | Wall time | Achieved depth |
+| Stage | Wall time | Notes |
 | --- | ---: | --- |
-| Full 20-ply live evidence request | 26.45 s | min 18 / median 20 / max 23 |
-| 14-ply Fried Liver live evidence request | 17.54 s | median 23 |
+| Exact 19-ply mating-line evidence request | 11.4 s | Cold process; median engine depth 20.5 |
+| Validated 19-ply Gemini 3.1 Flash-Lite coaching | 13.5 s | 19 structured explanations |
 
-These are measurements, not cross-machine guarantees. Stockfish and Lichess run
-concurrently, so the live request is governed mainly by the slower provider.
+The UI targets roughly 25–35 seconds for the complete opening review. These are
+measurements, not cross-machine or provider guarantees: Lichess throttling,
+Gemini load, and deployment CPU can increase latency. The loading screen shows
+the active stage and elapsed time rather than pretending the request has
+stalled.
 
 Verify configured external credentials with minimal requests:
 

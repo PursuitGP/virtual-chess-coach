@@ -8,8 +8,8 @@ import os
 from typing import Any
 
 
-PROMPT_VERSION = "2026-06-19.4"
-DEFAULT_MODEL = "gemini-3.5-flash"
+PROMPT_VERSION = "2026-06-20.1"
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
 VALID_PERSPECTIVES = {"white", "black", "both"}
 class AIConfigurationError(Exception):
     pass
@@ -138,7 +138,7 @@ Rules:
      "ply": 1,
      "move": "e4",
      "side": "white",
-     "explanation": "Position-specific coaching in 3-6 sentences.",
+     "explanation": "Position-specific coaching in 2-4 concise sentences.",
      "lesson": "One concise practical lesson.",
      "evidence_refs": ["stockfish.evaluation", "lichess.players.played_move"]
    }}]}}
@@ -321,12 +321,20 @@ def generate_explanations(
         )
 
     genai = _load_genai()
+    from google.genai import types as genai_types
+
     try:
         client = genai.Client(api_key=key)
         response = client.models.generate_content(
             model=_model_name(),
             contents=_build_prompt(analysis, perspective),
-            config={"response_mime_type": "application/json"},
+            config=genai_types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.2,
+                thinking_config=genai_types.ThinkingConfig(
+                    thinking_level=genai_types.ThinkingLevel.MINIMAL,
+                ),
+            ),
         )
     except AIConfigurationError:
         raise

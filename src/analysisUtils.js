@@ -7,6 +7,39 @@ export function apiUrl(path) {
   return `${configuredBase}${path}`;
 }
 
+export async function readJsonResponse(response, fallbackMessage) {
+  const text = await response.text();
+  if (!text.trim()) {
+    throw new Error(
+      `${fallbackMessage} The API returned an empty response. Confirm the Flask backend is running.`
+    );
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    throw new Error(
+      `${fallbackMessage} The API returned an unexpected response. Confirm the Flask backend and frontend proxy use the same port.`
+    );
+  }
+}
+
+export function fullMoveCount(plyCount) {
+  return Math.ceil(Math.max(0, plyCount) / 2);
+}
+
+export function movePositionLabel(plyIndex, totalPlies) {
+  const totalMoves = fullMoveCount(totalPlies);
+  if (plyIndex <= 0) {
+    return totalMoves
+      ? `Start position · ${totalMoves} move${totalMoves === 1 ? "" : "s"}`
+      : "Start position · no game loaded";
+  }
+  const moveNumber = Math.ceil(plyIndex / 2);
+  const side = plyIndex % 2 === 1 ? "White" : "Black";
+  return `Move ${moveNumber} · ${side} · ${moveNumber}/${totalMoves}`;
+}
+
 export function evaluationLabel(evaluation) {
   return evaluation?.display || "0.00";
 }

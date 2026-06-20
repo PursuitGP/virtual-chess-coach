@@ -32,6 +32,7 @@ LICHESS_EXPLORER_URL = os.getenv(
 ).rstrip("/")
 LICHESS_TIMEOUT_SECONDS = float(os.getenv("LICHESS_TIMEOUT_SECONDS", "5"))
 LICHESS_MOVE_LIMIT = int(os.getenv("LICHESS_MOVE_LIMIT", "10"))
+LICHESS_WORKERS = int(os.getenv("LICHESS_WORKERS", "2"))
 MIN_MASTER_GAMES = int(os.getenv("MIN_MASTER_GAMES", "20"))
 SOUND_MOVE_LOSS_CP = int(os.getenv("SOUND_MOVE_LOSS_CP", "40"))
 MISTAKE_MOVE_LOSS_CP = int(os.getenv("MISTAKE_MOVE_LOSS_CP", "100"))
@@ -56,13 +57,16 @@ ALLOWED_SPEEDS = {
     "correspondence",
 }
 
-_session = requests.Session()
-_session.headers.update(
-    {
-        "User-Agent": "VirtualChessCoach/2.0 (portfolio project)",
-        "Accept": "application/json",
-    }
-)
+_sessions = {
+    database: requests.Session() for database in ("masters", "lichess")
+}
+for _session in _sessions.values():
+    _session.headers.update(
+        {
+            "User-Agent": "VirtualChessCoach/2.0 (portfolio project)",
+            "Accept": "application/json",
+        }
+    )
 
 
 class AnalysisError(Exception):
@@ -199,16 +203,25 @@ def _position_records(
     return records, len(all_moves)
 
 
-def _normalize_engine_score(score: chess.engine.PovScore) -> dict[str, Any]:
+def _normalize_engine_score(
+    score: chess.engine.PovScore,
+    board: chess.Board | None = None,
+) -> dict[str, Any]:
     white_score = score.white()
     mate = white_score.mate()
     if mate is not None:
-        display = f"{'-' if mate < 0 else ''}M{abs(mate)}"
+        if mate == 0 and board is not None and board.is_checkmate():
+            winner = "black" if board.turn == chess.WHITE else "white"
+            display = "Checkmate"
+        else:
+            winner = "white" if mate > 0 else "black"
+            display = f"{'-' if mate < 0 else ''}M{abs(mate)}"
         return {
             "type": "mate",
             "value": int(mate),
             "pawns": None,
             "display": display,
+            "winner": winner,
         }
 
     value = white_score.score()
@@ -298,7 +311,10 @@ def evaluate_with_stockfish(
             top_lines.append(
                 {
                     "rank": rank,
-                    "evaluation": _normalize_engine_score(info["score"]),
+                    "evaluation": _normalize_engine_score(
+                        info["score"],
+                        board,
+                    ),
                     "depth": info.get("depth"),
                     "seldepth": info.get("seldepth"),
                     "nodes": info.get("nodes"),
@@ -380,7 +396,7 @@ def evaluate_with_stockfish(
         achieved_depths = [
             value["depth"]
             for value in all_evaluations
-            if isinstance(value.get("depth"), int)
+            if isinstance(value.get("depth"), int) and value["depth"] > 0
         ]
         search_time_ms = sum(
             int(value.get("time_ms") or 0) for value in all_evaluations
@@ -414,7 +430,10 @@ def evaluate_with_stockfish(
 
 
 def _lichess_headers() -> dict[str, str]:
-    headers = dict(_session.headers)
+    headers = {
+        "User-Agent": "VirtualChessCoach/2.0 (portfolio project)",
+        "Accept": "application/json",
+    }
     token = os.getenv("LICHESS_TOKEN", "").strip()
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -426,6 +445,7 @@ def lichess_status() -> dict[str, Any]:
         "configured": bool(os.getenv("LICHESS_TOKEN", "").strip()),
         "endpoint": LICHESS_EXPLORER_URL,
         "rating_groups": sorted(ALLOWED_RATING_GROUPS),
+        "workers": max(1, min(LICHESS_WORKERS, 2)),
     }
 
 
@@ -517,7 +537,8 @@ def fetch_lichess_explorer(
         if speeds:
             params["speeds"] = ",".join(speeds)
 
-    response = _session.get(
+    session = _sessions[database]
+    response = session.get(
         f"{LICHESS_EXPLORER_URL}/{database}",
         params=params,
         headers=_lichess_headers(),
@@ -526,7 +547,7 @@ def fetch_lichess_explorer(
     if response.status_code == 429:
         retry_after = min(int(response.headers.get("Retry-After", "1")), 5)
         time.sleep(max(retry_after, 1))
-        response = _session.get(
+        response = session.get(
             f"{LICHESS_EXPLORER_URL}/{database}",
             params=params,
             headers=_lichess_headers(),
@@ -745,11 +766,12 @@ def collect_lichess_evidence(
     speeds: tuple[str, ...] = (),
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[str, Any]]:
     started = time.perf_counter()
-    unique_fens = {
-        fen
-        for record in records
-        for fen in (record["previous_fen"], record["fen"])
-    }
+    ordered_fens = list(
+        dict.fromkeys(
+            [records[0]["previous_fen"]]
+            + [record["fen"] for record in records]
+        )
+    )
     explorer_cache: dict[tuple[str, str], dict[str, Any]] = {}
     database_failures: dict[str, str] = {}
 
@@ -775,24 +797,59 @@ def collect_lichess_evidence(
                 "Lichess Opening Explorer was unavailable."
             )
 
-    # Lichess explicitly asks API clients to make one request at a time.
-    for fen in sorted(unique_fens):
-        for database in ("masters", "lichess"):
-            if database in database_failures:
-                explorer_cache[(fen, database)] = _unavailable_explorer(
-                    database_failures[database]
+    def load_database(database: str):
+        results = {}
+        failure_reason = None
+        sample_exhausted = False
+        for fen in ordered_fens:
+            board = chess.Board(fen)
+            if board.is_game_over():
+                results[(fen, database)] = {
+                    **_unavailable_explorer("Game is over."),
+                    "available": True,
+                    "reason": None,
+                }
+                continue
+            if failure_reason:
+                results[(fen, database)] = _unavailable_explorer(
+                    failure_reason
                 )
                 continue
+            if sample_exhausted:
+                results[(fen, database)] = {
+                    **_unavailable_explorer(
+                        "No deeper games remain in this database sample."
+                    ),
+                    "available": True,
+                    "reason": None,
+                }
+                continue
+
             result = load_explorer(fen, database)
-            explorer_cache[(fen, database)] = result
+            results[(fen, database)] = result
             if not result.get("available"):
-                database_failures[database] = result.get("reason") or (
+                failure_reason = result.get("reason") or (
                     "Lichess Opening Explorer was unavailable."
                 )
+            elif result.get("total_games", 0) == 0:
+                sample_exhausted = True
+        return database, results, failure_reason
+
+    with ThreadPoolExecutor(max_workers=max(1, min(LICHESS_WORKERS, 2))) as executor:
+        futures = [
+            executor.submit(load_database, database)
+            for database in ("masters", "lichess")
+        ]
+        for future in futures:
+            database, results, failure_reason = future.result()
+            explorer_cache.update(results)
+            if failure_reason:
+                database_failures[database] = failure_reason
 
     metadata = {
         "wall_time_ms": round((time.perf_counter() - started) * 1000),
-        "positions_requested": len(unique_fens),
+        "positions_requested": len(ordered_fens),
+        "workers": max(1, min(LICHESS_WORKERS, 2)),
         "database_failures": database_failures,
     }
     return explorer_cache, metadata
@@ -819,7 +876,12 @@ def attach_lichess_evidence(
         uci = record["played_move"]["uci"]
         played_masters = _played_move(before_masters, uci)
         played_players = _played_move(before_players, uci)
-        opening = after_masters.get("opening") or after_players.get("opening")
+        opening = (
+            after_masters.get("opening")
+            or after_players.get("opening")
+            or before_masters.get("opening")
+            or before_players.get("opening")
+        )
         opening_context = context_for_opening(opening)
         practical_signal = _practical_signal(
             record,
@@ -895,6 +957,7 @@ def add_motif_evidence(records: list[dict[str, Any]], warnings: list[str]) -> No
         sf_raw = {
             "type": evaluation["type"],
             "value": evaluation["value"],
+            "winner": evaluation.get("winner"),
             "pv": (
                 record["stockfish"]["top_lines"][0]["moves_uci"]
                 if record["stockfish"].get("top_lines")
@@ -978,6 +1041,7 @@ def build_analysis(
     stockfish_multipv: int = 1,
     stockfish_threads: int = 1,
     stockfish_hash_mb: int = 64,
+    stockfish_total_seconds: float | None = 16.0,
     lichess_ratings: tuple[int, ...] | list[int] | None = None,
     lichess_speeds: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
@@ -986,13 +1050,28 @@ def build_analysis(
     positions, total_plies = _position_records(game, max_plies=max_plies)
     rating_groups = normalize_rating_groups(lichess_ratings)
     speeds = normalize_speeds(lichess_speeds)
+    position_count = len(positions) + 1
+    effective_stockfish_seconds = stockfish_max_seconds
+    if (
+        stockfish_total_seconds is not None
+        and stockfish_total_seconds > 0
+        and position_count > 0
+    ):
+        total_budget_per_position = stockfish_total_seconds / position_count
+        if effective_stockfish_seconds is None:
+            effective_stockfish_seconds = total_budget_per_position
+        else:
+            effective_stockfish_seconds = min(
+                effective_stockfish_seconds,
+                total_budget_per_position,
+            )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         stockfish_future = executor.submit(
             evaluate_with_stockfish,
             positions,
             depth=stockfish_depth,
-            max_seconds=stockfish_max_seconds,
+            max_seconds=effective_stockfish_seconds,
             multipv=stockfish_multipv,
             threads=stockfish_threads,
             hash_mb=stockfish_hash_mb,
@@ -1005,6 +1084,10 @@ def build_analysis(
         )
         initial_stockfish, stockfish_provider = stockfish_future.result()
         explorer_cache, lichess_metadata = lichess_future.result()
+    stockfish_provider["configured_max_seconds_per_position"] = (
+        stockfish_max_seconds
+    )
+    stockfish_provider["total_time_budget_seconds"] = stockfish_total_seconds
 
     attach_lichess_evidence(
         positions,

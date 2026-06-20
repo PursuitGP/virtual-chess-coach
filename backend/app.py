@@ -171,6 +171,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         STOCKFISH_MULTIPV=_env_int("STOCKFISH_MULTIPV", 1),
         STOCKFISH_THREADS=_env_int("STOCKFISH_THREADS", 1),
         STOCKFISH_HASH_MB=_env_int("STOCKFISH_HASH_MB", 64),
+        STOCKFISH_TOTAL_SECONDS=_env_float("STOCKFISH_TOTAL_SECONDS", 16.0),
         ANALYSIS_RATE_LIMIT=_env_int("ANALYSIS_RATE_LIMIT", 20),
         EXPLAIN_RATE_LIMIT=_env_int("EXPLAIN_RATE_LIMIT", 5),
         DISABLE_RATE_LIMITS=_env_bool("DISABLE_RATE_LIMITS", False),
@@ -225,6 +226,9 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                         "multipv": app.config["STOCKFISH_MULTIPV"],
                         "threads": app.config["STOCKFISH_THREADS"],
                         "hash_mb": app.config["STOCKFISH_HASH_MB"],
+                        "total_time_budget_seconds": app.config[
+                            "STOCKFISH_TOTAL_SECONDS"
+                        ],
                     },
                     "gemini": ai,
                     "lichess": {
@@ -285,6 +289,9 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 stockfish_multipv=app.config["STOCKFISH_MULTIPV"],
                 stockfish_threads=app.config["STOCKFISH_THREADS"],
                 stockfish_hash_mb=app.config["STOCKFISH_HASH_MB"],
+                stockfish_total_seconds=app.config[
+                    "STOCKFISH_TOTAL_SECONDS"
+                ],
                 lichess_ratings=ratings,
                 lichess_speeds=speeds,
             )
@@ -475,6 +482,6 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    port = _env_int("PORT", 5000)
+    port = _env_int("PORT", 5050)
     debug = _env_bool("FLASK_DEBUG", False)
     app.run(host="0.0.0.0", port=port, debug=debug)

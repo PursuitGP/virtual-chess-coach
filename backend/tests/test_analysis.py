@@ -157,6 +157,29 @@ class AnalysisTests(unittest.TestCase):
         self.assertTrue(first["stockfish"]["top_lines"])
         self.assertEqual(result["providers"]["stockfish"]["engine"], "Stockfish Test")
         self.assertEqual(result["providers"]["stockfish"]["achieved_depth"]["minimum"], 14)
+        self.assertEqual(
+            result["providers"]["stockfish"]["total_time_budget_seconds"],
+            16.0,
+        )
+
+    def test_terminal_mate_score_uses_board_winner(self):
+        game = chess.pgn.read_game(io.StringIO("1. f3 e5 2. g4 Qh4#"))
+        board = game.end().board()
+        evaluation = analysis._normalize_engine_score(
+            chess.engine.PovScore(chess.engine.Mate(0), chess.WHITE),
+            board,
+        )
+        self.assertEqual(evaluation["display"], "Checkmate")
+        self.assertEqual(evaluation["winner"], "black")
+
+    def test_total_stockfish_budget_bounds_long_openings(self):
+        pgn = (ROOT / "pgns" / "immortal_game_clean.pgn").read_bytes()
+        result = self.build(pgn, max_plies=20)
+        provider = result["providers"]["stockfish"]
+        self.assertAlmostEqual(
+            provider["time_limit_seconds_per_position"],
+            16 / 21,
+        )
 
     def test_rating_filter_and_outcome_context_are_preserved(self):
         calls = []
@@ -207,7 +230,7 @@ class AnalysisTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"LICHESS_TOKEN": "secret-token"}),
             patch.object(
-                analysis._session,
+                analysis._sessions["lichess"],
                 "get",
                 return_value=response,
             ) as get,

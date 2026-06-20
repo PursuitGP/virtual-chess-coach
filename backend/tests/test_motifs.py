@@ -55,6 +55,22 @@ def add_engine_fixtures(records, *, mark_last_mate=False):
 
 
 class MotifConfidenceTests(unittest.TestCase):
+    def test_terminal_checkmate_is_attributed_to_the_winner(self):
+        game = chess.pgn.read_game(
+            io.StringIO("1. f3 e5 2. g4 Qh4#")
+        )
+        board = game.end().board()
+        motifs = detect_motifs(
+            board=board,
+            move_number=4,
+            eval_cp=0,
+            sf_raw={"type": "mate", "value": 0, "winner": "black"},
+            last_move_uci="d8h4",
+        )
+        self.assertEqual(motifs[0]["name"], "Checkmate")
+        self.assertEqual(motifs[0]["side"], "black")
+        self.assertIn("Black has delivered checkmate", motifs[0]["explanation"])
+
     def test_quiet_move_is_not_an_equal_trade(self):
         previous = chess.Board()
         board = previous.copy()
