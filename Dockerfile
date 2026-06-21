@@ -22,7 +22,7 @@ RUN curl -fsSL \
         "https://github.com/official-stockfish/Stockfish/archive/refs/tags/${STOCKFISH_VERSION}.tar.gz" \
         | tar -xz --strip-components=1 \
     && case "${TARGETARCH}" in \
-        amd64) stockfish_arch="x86-64-universal" ;; \
+        amd64) stockfish_arch="x86-64" ;; \
         arm64) stockfish_arch="armv8" ;; \
         *) stockfish_arch="general-64" ;; \
        esac \
