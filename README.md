@@ -290,6 +290,7 @@ Public defaults are intentionally conservative:
 - One Gunicorn worker with two request threads
 - Analysis limit: 20 requests per IP per hour
 - Gemini limit: 5 requests per IP per hour
+- One bounded retry for transient Gemini overload and 5xx failures
 - In-memory cache for identical coaching requests
 - Same-origin production requests and no unrestricted CORS
 - Development-only motif endpoint

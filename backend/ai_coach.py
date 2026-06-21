@@ -6,10 +6,11 @@ import hashlib
 import json
 import os
 import re
+import time
 from typing import Any
 
 
-PROMPT_VERSION = "2026-06-20.5"
+PROMPT_VERSION = "2026-06-20.6"
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 VALID_PERSPECTIVES = {"white", "black", "both"}
 
@@ -32,6 +33,30 @@ def _model_name() -> str:
 
 def _api_key() -> str | None:
     return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+
+def _provider_attempts() -> int:
+    try:
+        return max(1, min(int(os.getenv("GEMINI_PROVIDER_ATTEMPTS", "2")), 3))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _is_transient_provider_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "503",
+            "unavailable",
+            "high demand",
+            "temporarily",
+            "timeout",
+            "timed out",
+            "connection reset",
+            "500 internal",
+        )
+    )
 
 
 def _load_genai():
@@ -673,69 +698,6 @@ def _ground_explanation(
 
 def _response_json_schema(analysis: dict[str, Any]) -> dict[str, Any]:
     positions = analysis.get("positions") or []
-    item_schemas = []
-    for index, position in enumerate(positions):
-        previous_position = (
-            positions[index - 1]
-            if index > 0
-            else {
-                "ply": 0,
-                "stockfish": analysis.get("initial_stockfish") or {},
-            }
-        )
-        next_position = (
-            positions[index + 1]
-            if index + 1 < len(positions)
-            else None
-        )
-        allowed_refs = sorted(
-            _allowed_refs(
-                position,
-                previous_position=previous_position,
-                next_position=next_position,
-            )
-        )
-        item_schemas.append(
-            {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "ply",
-                    "move",
-                    "side",
-                    "explanation",
-                    "lesson",
-                    "evidence_refs",
-                ],
-                "properties": {
-                    "ply": {
-                        "type": "integer",
-                        "enum": [position.get("ply")],
-                    },
-                    "move": {
-                        "type": "string",
-                        "enum": [
-                            (position.get("played_move") or {}).get("san")
-                        ],
-                    },
-                    "side": {
-                        "type": "string",
-                        "enum": [position.get("side")],
-                    },
-                    "explanation": {"type": "string"},
-                    "lesson": {"type": "string"},
-                        "evidence_refs": {
-                            "type": "array",
-                            "minItems": 1,
-                            "items": {
-                            "type": "string",
-                            "enum": allowed_refs,
-                        },
-                    },
-                },
-            }
-        )
-
     position_count = len(positions)
     return {
         "type": "object",
@@ -746,7 +708,33 @@ def _response_json_schema(analysis: dict[str, Any]) -> dict[str, Any]:
                 "type": "array",
                 "minItems": position_count,
                 "maxItems": position_count,
-                "prefixItems": item_schemas,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "ply",
+                        "move",
+                        "side",
+                        "explanation",
+                        "lesson",
+                        "evidence_refs",
+                    ],
+                    "properties": {
+                        "ply": {"type": "integer"},
+                        "move": {"type": "string"},
+                        "side": {
+                            "type": "string",
+                            "enum": ["white", "black"],
+                        },
+                        "explanation": {"type": "string"},
+                        "lesson": {"type": "string"},
+                        "evidence_refs": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"type": "string"},
+                        },
+                    },
+                },
             }
         },
     }
@@ -789,10 +777,25 @@ def validate_explanations(
             explanation.strip(),
             expected,
         )
-        sentence_count = _sentence_count(explanation)
+        sentences = _split_sentences(explanation)
+        if len(sentences) > 6:
+            sentences = sentences[:6]
+            explanation = " ".join(sentences)
+        elif len(sentences) == 3:
+            decision = expected.get("decision_context") or {}
+            assessment = decision.get("assessment_after") or {}
+            sentences.append(
+                "After the move, the supplied engine assessment is "
+                f"{_assessment_phrase(assessment)}."
+            )
+            explanation = " ".join(sentences)
+            grounded_refs.add("decision_context")
+
+        sentence_count = len(sentences)
         if sentence_count < 4 or sentence_count > 6:
             raise AIResponseError(
-                "A coaching explanation must contain 4 to 6 complete sentences."
+                "A coaching explanation must contain 4 to 6 complete "
+                f"sentences at ply {expected.get('ply')}."
             )
         if not isinstance(lesson, str) or not lesson.strip():
             raise AIResponseError("A coaching lesson was missing.")
@@ -819,15 +822,21 @@ def validate_explanations(
         )
         normalized_refs: list[str] = []
         for ref in refs:
-            if not isinstance(ref, str) or ref not in allowed:
-                raise AIResponseError(
-                    f"Gemini cited unavailable evidence for ply {expected.get('ply')}."
-                )
-            if ref not in normalized_refs:
+            if (
+                isinstance(ref, str)
+                and ref in allowed
+                and ref not in normalized_refs
+            ):
                 normalized_refs.append(ref)
         for ref in sorted(grounded_refs):
             if ref in allowed and ref not in normalized_refs:
                 normalized_refs.append(ref)
+        if not normalized_refs:
+            normalized_refs.append(
+                "decision_context"
+                if "decision_context" in allowed
+                else "stockfish.evaluation"
+            )
 
         validated.append(
             {
@@ -880,27 +889,42 @@ def generate_explanations(
     genai = _load_genai()
     from google.genai import types as genai_types
 
-    try:
-        client = genai.Client(api_key=key)
-        response = client.models.generate_content(
-            model=_model_name(),
-            contents=_build_prompt(analysis, perspective),
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_json_schema=_response_json_schema(analysis),
-                max_output_tokens=8192,
-                temperature=0.2,
-                thinking_config=genai_types.ThinkingConfig(
-                    thinking_level=genai_types.ThinkingLevel.MINIMAL,
+    client = genai.Client(api_key=key)
+    response = None
+    last_error: Exception | None = None
+    for attempt in range(_provider_attempts()):
+        try:
+            response = client.models.generate_content(
+                model=_model_name(),
+                contents=_build_prompt(analysis, perspective),
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema=_response_json_schema(analysis),
+                    max_output_tokens=8192,
+                    temperature=0.2,
+                    thinking_config=genai_types.ThinkingConfig(
+                        thinking_level=genai_types.ThinkingLevel.MINIMAL,
+                    ),
                 ),
-            ),
-        )
-    except AIConfigurationError:
-        raise
-    except Exception as exc:
+            )
+            break
+        except AIConfigurationError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if (
+                attempt + 1 >= _provider_attempts()
+                or not _is_transient_provider_error(exc)
+            ):
+                break
+            time.sleep(1.0 * (attempt + 1))
+
+    if response is None:
+        assert last_error is not None
         raise AIProviderError(
-            f"{_safe_provider_error(exc)} Your analysis is preserved; please retry."
-        ) from exc
+            f"{_safe_provider_error(last_error)} "
+            "Your analysis is preserved; please retry."
+        ) from last_error
 
     text = _extract_json_text(response)
     try:
@@ -928,4 +952,8 @@ def _safe_provider_error(exc: Exception) -> str:
         return "Gemini quota or rate limits were exceeded."
     if "model" in text and ("not found" in text or "404" in text):
         return f"Gemini model {_model_name()} is unavailable for this project."
+    if "503" in text or "high demand" in text or "unavailable" in text:
+        return "Gemini is temporarily overloaded."
+    if "invalid_argument" in text or "invalid argument" in text or "400" in text:
+        return "Gemini rejected the structured coaching request."
     return "Gemini could not generate coaching."

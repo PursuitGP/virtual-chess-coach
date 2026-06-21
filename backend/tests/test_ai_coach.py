@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 import os
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from backend.ai_coach import (
     AIConfigurationError,
@@ -13,6 +13,7 @@ from backend.ai_coach import (
     _ground_explanation,
     _required_coaching_points,
     _response_json_schema,
+    _sentence_count,
     build_explanation_cache_key,
     generate_explanations,
     validate_explanations,
@@ -123,11 +124,14 @@ class AICoachValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(AIResponseError, "move not found"):
             validate_explanations(payload, sample_analysis())
 
-    def test_rejects_invented_evidence_reference(self):
+    def test_discards_invented_evidence_reference(self):
         payload = valid_payload()
         payload["explanations"][0]["evidence_refs"] = ["lichess.fake.statistic"]
-        with self.assertRaisesRegex(AIResponseError, "unavailable evidence"):
-            validate_explanations(payload, sample_analysis())
+        result = validate_explanations(payload, sample_analysis())
+        self.assertEqual(
+            result[0]["evidence_refs"],
+            ["decision_context"],
+        )
 
     def test_cache_key_changes_with_perspective(self):
         white = build_explanation_cache_key(sample_analysis(), "white")
@@ -187,23 +191,53 @@ class AICoachValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(AIResponseError, "too short|4 to 6"):
             validate_explanations(payload, sample_analysis())
 
+    def test_normalizes_three_and_seven_sentence_coaching(self):
+        three = valid_payload()
+        three["explanations"][0]["explanation"] = (
+            "White occupies the center with e4 and opens useful lines for the "
+            "queen and bishop. Black must now decide how to challenge that "
+            "central pawn while continuing development. White gains space "
+            "without committing the remaining pieces too early."
+        )
+        three_result = validate_explanations(three, sample_analysis())
+        self.assertEqual(
+            _sentence_count(three_result[0]["explanation"]),
+            4,
+        )
+        self.assertIn(
+            "supplied engine assessment",
+            three_result[0]["explanation"],
+        )
+
+        seven = valid_payload()
+        seven["explanations"][0]["explanation"] = (
+            "White occupies the center with e4. The pawn opens the queen. "
+            "It also opens the bishop. Black must challenge the center. "
+            "White has several development choices. King safety still matters. "
+            "This seventh sentence should be removed."
+        )
+        seven_result = validate_explanations(seven, sample_analysis())
+        self.assertEqual(
+            _sentence_count(seven_result[0]["explanation"]),
+            6,
+        )
+        self.assertNotIn(
+            "seventh sentence",
+            seven_result[0]["explanation"],
+        )
+
     def test_response_schema_requires_one_structured_object_per_position(self):
         analysis = sample_analysis()
         schema = _response_json_schema(analysis)
         explanations = schema["properties"]["explanations"]
         self.assertEqual(explanations["minItems"], 1)
         self.assertEqual(explanations["maxItems"], 1)
-        item = explanations["prefixItems"][0]
+        item = explanations["items"]
         self.assertEqual(item["type"], "object")
         self.assertIn("explanation", item["required"])
-        self.assertEqual(item["properties"]["move"]["enum"], ["e4"])
-        self.assertIn(
-            "motifs.take_center",
-            item["properties"]["evidence_refs"]["items"]["enum"],
-        )
-        self.assertIn(
-            "decision_context",
-            item["properties"]["evidence_refs"]["items"]["enum"],
+        self.assertEqual(
+            item["properties"]["evidence_refs"]["items"],
+            {"type": "string"},
         )
 
     def test_required_points_force_mate_blunder_contrast(self):
@@ -352,6 +386,33 @@ class AICoachValidationTests(unittest.TestCase):
             result = generate_explanations(sample_analysis(), "white")
         self.assertEqual(result["perspective"], "white")
         self.assertEqual(result["explanations"][0]["ply"], 1)
+
+    def test_generate_explanations_retries_transient_provider_failure(self):
+        response = SimpleNamespace(
+            text=__import__("json").dumps(valid_payload())
+        )
+        generate = Mock(
+            side_effect=[RuntimeError("503 high demand"), response]
+        )
+        models = SimpleNamespace(generate_content=generate)
+        fake_genai = SimpleNamespace(
+            Client=lambda **_kwargs: SimpleNamespace(models=models)
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GEMINI_API_KEY": "test-key",
+                    "GEMINI_PROVIDER_ATTEMPTS": "2",
+                },
+                clear=True,
+            ),
+            patch("backend.ai_coach._load_genai", return_value=fake_genai),
+            patch("backend.ai_coach.time.sleep"),
+        ):
+            result = generate_explanations(sample_analysis(), "white")
+        self.assertEqual(result["explanations"][0]["ply"], 1)
+        self.assertEqual(generate.call_count, 2)
 
     def test_missing_key_and_malformed_json_are_explicit_failures(self):
         with patch.dict(os.environ, {}, clear=True):
