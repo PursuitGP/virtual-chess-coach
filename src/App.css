@@ -346,6 +346,8 @@ label {
 }
 
 .manual-board {
+  width: fit-content;
+  max-width: 100%;
   overflow: hidden;
 }
 
@@ -531,6 +533,7 @@ label {
 .board-column,
 .insight-column {
   display: grid;
+  min-width: 0;
   gap: 1.25rem;
 }
 
@@ -570,6 +573,13 @@ label {
   flex: 1;
 }
 
+.toolbar-actions,
+.move-navigation {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
 .arrow-toggle {
   display: inline-flex;
   align-items: center;
@@ -607,16 +617,17 @@ label {
 
 .board-wrap {
   display: flex;
+  min-width: 0;
+  align-items: stretch;
   justify-content: center;
-  align-items: center;
   gap: 0.55rem;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .engine-rail {
   display: flex;
+  flex: 0 0 auto;
   align-items: stretch;
-  align-self: stretch;
   gap: 0.42rem;
 }
 
@@ -660,12 +671,25 @@ label {
 .eval-bar {
   position: relative;
   width: 22px;
-  height: min(600px, calc(100vw - 64px));
+  height: 100%;
   max-height: 600px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.35);
   border-radius: 5px;
   background: #020403;
+}
+
+.chessboard-stage {
+  width: 100%;
+  min-width: 0;
+  max-width: 600px;
+  flex: 1 1 0;
+  aspect-ratio: 1;
+}
+
+.chessboard-stage > .cg-wrap {
+  width: 100% !important;
+  height: 100% !important;
 }
 
 .eval-fill {
@@ -1281,9 +1305,7 @@ label {
   }
 
   .manual-board {
-    width: max-content;
-    max-width: 100%;
-    overflow: auto;
+    overflow: hidden;
   }
 }
 
@@ -1315,6 +1337,7 @@ label {
 
   .manual-choice,
   .manual-entry-heading,
+  .review-header,
   .result-banner,
   .game-context {
     align-items: stretch;
@@ -1326,7 +1349,7 @@ label {
   }
 
   .manual-board {
-    overflow: auto;
+    overflow: hidden;
   }
 
   .manual-actions,
@@ -1342,16 +1365,81 @@ label {
     grid-template-columns: 1fr;
   }
 
+  .board-panel {
+    padding: 0.75rem;
+  }
+
+  .toolbar {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .toolbar-actions,
+  .move-navigation {
+    width: 100%;
+  }
+
+  .toolbar-actions > button {
+    flex: 1;
+  }
+
+  .toolbar-spacer {
+    display: none;
+  }
+
+  .move-navigation {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  }
+
+  .move-navigation button {
+    min-width: 42px;
+    min-height: 42px;
+    padding: 0.5rem;
+  }
+
   .board-wrap {
-    justify-content: flex-start;
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-items: stretch;
+    justify-content: stretch;
+    gap: 0.55rem;
+  }
+
+  .engine-rail {
+    display: contents;
   }
 
   .engine-readout {
-    width: 72px;
+    display: grid;
+    width: 100%;
+    grid-column: 1 / -1;
+    grid-row: 1;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding: 0 0 0.1rem;
+    text-align: left;
+  }
+
+  .engine-readout span:nth-child(2) {
+    text-align: center;
+  }
+
+  .engine-readout span:last-child {
+    text-align: right;
   }
 
   .eval-bar {
+    height: 100%;
     width: 16px;
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .chessboard-stage {
+    max-width: 100%;
+    grid-column: 2;
+    grid-row: 2;
   }
 
   .paste-actions {
@@ -1359,7 +1447,22 @@ label {
   }
 
   .move-counter {
-    order: 3;
+    min-width: 0;
     width: 100%;
+  }
+
+  .section-heading {
+    flex-wrap: wrap;
+  }
+
+  .coach-heading-status {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .evidence-row strong,
+  .supporting-details > details > summary small {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 }

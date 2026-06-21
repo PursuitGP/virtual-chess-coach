@@ -162,7 +162,7 @@ function useBoardSize() {
   const [size, setSize] = useState(560);
   useEffect(() => {
     const resize = () => {
-      const available = Math.max(300, window.innerWidth - 64);
+      const available = Math.max(240, window.innerWidth - 64);
       setSize(Math.min(600, available));
     };
     resize();
@@ -680,64 +680,68 @@ export default function App() {
             tabIndex={-1}
           >
             <div className="toolbar">
-              <button
-                type="button"
-                onClick={() =>
-                  setOrientation((value) =>
-                    value === "white" ? "black" : "white"
-                  )
-                }
-              >
-                Flip board
-              </button>
-              <button
-                type="button"
-                className={`arrow-toggle ${showMoveArrows ? "active" : ""}`}
-                aria-pressed={showMoveArrows}
-                onClick={() => setShowMoveArrows((value) => !value)}
-                title="Show the played move and Stockfish's first choice"
-              >
-                <span className="arrow-key played" aria-hidden="true" />
-                Played
-                <span className="arrow-key best" aria-hidden="true" />
-                Best
-              </button>
+              <div className="toolbar-actions">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setOrientation((value) =>
+                      value === "white" ? "black" : "white"
+                    )
+                  }
+                >
+                  Flip board
+                </button>
+                <button
+                  type="button"
+                  className={`arrow-toggle ${showMoveArrows ? "active" : ""}`}
+                  aria-pressed={showMoveArrows}
+                  onClick={() => setShowMoveArrows((value) => !value)}
+                  title="Show the played move and Stockfish's first choice"
+                >
+                  <span className="arrow-key played" aria-hidden="true" />
+                  Played
+                  <span className="arrow-key best" aria-hidden="true" />
+                  Best
+                </button>
+              </div>
               <span className="toolbar-spacer" />
-              <button
-                type="button"
-                onClick={() => goTo(0)}
-                disabled={!plyIndex}
-                aria-label="Go to start"
-              >
-                ⏮
-              </button>
-              <button
-                type="button"
-                onClick={() => goTo(plyIndex - 1)}
-                disabled={!plyIndex}
-                aria-label="Previous move"
-              >
-                ◀
-              </button>
-              <span className="move-counter">
-                {movePositionLabel(plyIndex, pgnMoves.length)}
-              </span>
-              <button
-                type="button"
-                onClick={() => goTo(plyIndex + 1)}
-                disabled={plyIndex >= pgnMoves.length}
-                aria-label="Next move"
-              >
-                ▶
-              </button>
-              <button
-                type="button"
-                onClick={() => goTo(pgnMoves.length)}
-                disabled={plyIndex >= pgnMoves.length}
-                aria-label="Go to end"
-              >
-                ⏭
-              </button>
+              <div className="move-navigation">
+                <button
+                  type="button"
+                  onClick={() => goTo(0)}
+                  disabled={!plyIndex}
+                  aria-label="Go to start"
+                >
+                  ⏮
+                </button>
+                <button
+                  type="button"
+                  onClick={() => goTo(plyIndex - 1)}
+                  disabled={!plyIndex}
+                  aria-label="Previous move"
+                >
+                  ◀
+                </button>
+                <span className="move-counter">
+                  {movePositionLabel(plyIndex, pgnMoves.length)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => goTo(plyIndex + 1)}
+                  disabled={plyIndex >= pgnMoves.length}
+                  aria-label="Next move"
+                >
+                  ▶
+                </button>
+                <button
+                  type="button"
+                  onClick={() => goTo(pgnMoves.length)}
+                  disabled={plyIndex >= pgnMoves.length}
+                  aria-label="Go to end"
+                >
+                  ⏭
+                </button>
+              </div>
             </div>
 
             <div className="board-wrap">
@@ -761,7 +765,6 @@ export default function App() {
                 <div
                   className="eval-bar"
                   aria-label="Stockfish evaluation"
-                  style={{ height: `${boardSize}px` }}
                 >
                   <div
                     className="eval-fill"
@@ -769,32 +772,34 @@ export default function App() {
                   />
                 </div>
               </div>
-              <Chessground
-                width={boardSize}
-                height={boardSize}
-                orientation={orientation}
-                fen={fen}
-                turnColor={turnColor}
-                lastMove={lastMove}
-                animation={{ enabled: true, duration: 180 }}
-                highlight={{ lastMove: true, check: true }}
-                draggable={{ enabled: !pgnMoves.length }}
-                movable={{
-                  free: false,
-                  color: pgnMoves.length ? undefined : "both",
-                  dests,
-                  showDests: true,
-                }}
-                drawable={{
-                  enabled: true,
-                  visible: true,
-                  defaultSnapToValidMove: true,
-                  eraseOnClick: false,
-                  autoShapes: reviewArrows,
-                  brushes: REVIEW_ARROW_BRUSHES,
-                }}
-                onMove={moveBoard}
-              />
+              <div className="chessboard-stage">
+                <Chessground
+                  width="100%"
+                  height="100%"
+                  orientation={orientation}
+                  fen={fen}
+                  turnColor={turnColor}
+                  lastMove={lastMove}
+                  animation={{ enabled: true, duration: 180 }}
+                  highlight={{ lastMove: true, check: true }}
+                  draggable={{ enabled: !pgnMoves.length }}
+                  movable={{
+                    free: false,
+                    color: pgnMoves.length ? undefined : "both",
+                    dests,
+                    showDests: true,
+                  }}
+                  drawable={{
+                    enabled: true,
+                    visible: true,
+                    defaultSnapToValidMove: true,
+                    eraseOnClick: false,
+                    autoShapes: reviewArrows,
+                    brushes: REVIEW_ARROW_BRUSHES,
+                  }}
+                  onMove={moveBoard}
+                />
+              </div>
             </div>
 
             <details className="chart-disclosure" open>
