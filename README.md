@@ -252,13 +252,15 @@ entries without adding runtime scraping or network latency to game review.
 
 ### `GET /api/health`
 
-Reports Stockfish and Gemini availability plus public analysis limits. It does not contact Gemini.
+Reports Stockfish and Gemini availability plus public analysis limits. It does
+not contact Gemini. Railway uses this endpoint to confirm that the web service
+started and can answer requests.
 
 ### `GET /api/ready`
 
 Returns HTTP 200 only when Stockfish, Gemini configuration, Lichess
-configuration, and the local study database are ready. Railway uses this
-endpoint for deployment health checks.
+configuration, and the local study database are ready. Check this stricter
+endpoint before sharing a deployment.
 
 ### `POST /api/analyze`
 
