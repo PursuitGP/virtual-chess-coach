@@ -1,0 +1,11 @@
+[Event "Englund Gambit trap regression"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "White"]
+[Black "Black"]
+[Result "0-1"]
+[Termination "checkmate"]
+
+1. d4 e5 2. dxe5 Nc6 3. Nf3 Qe7 4. Bf4 Qb4+ 5. Bd2 Qxb2
+6. Bc3 Bb4 7. Qd2 Bxc3 8. Qxc3 Qc1# 0-1

@@ -78,6 +78,26 @@ export function buildExplanationMap(explanations) {
   return result;
 }
 
+export function moveUci(move) {
+  if (!move?.from || !move?.to) return null;
+  return `${move.from}${move.to}${move.promotion || ""}`;
+}
+
+export function reviewArrowUcis(plyIndex, moves, analysis) {
+  const currentStockfish =
+    plyIndex > 0
+      ? analysis?.positions?.[plyIndex - 1]?.stockfish
+      : analysis?.initial_stockfish;
+  const bestLine = currentStockfish?.top_lines?.[0]?.moves_uci || [];
+  return {
+    nextPlayed: moveUci(moves?.[plyIndex]),
+    best:
+      bestLine[0] ||
+      currentStockfish?.best_move ||
+      null,
+  };
+}
+
 export function gameResultSummary(headers, moves) {
   const metadata = headers || {};
   const result = metadata.Result || "*";

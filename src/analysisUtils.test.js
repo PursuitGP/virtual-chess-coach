@@ -4,6 +4,7 @@ import {
   evaluationLabel,
   fullMoveCount,
   gameResultSummary,
+  reviewArrowUcis,
   movePositionLabel,
   pointColor,
   readJsonResponse,
@@ -45,6 +46,43 @@ test("keys validated explanations by ply", () => {
   ];
   const result = buildExplanationMap(explanations);
   expect(result.get(2).explanation).toBe("second");
+});
+
+test("builds review arrows from the position currently on the board", () => {
+  const moves = [
+    { from: "e2", to: "e4", san: "e4" },
+    { from: "e7", to: "e5", san: "e5" },
+  ];
+  const analysis = {
+    initial_stockfish: {
+      top_lines: [{ moves_uci: ["d2d4"] }],
+    },
+    positions: [
+      {
+        stockfish: {
+          top_lines: [{ moves_uci: ["c7c5"] }],
+        },
+      },
+      {
+        stockfish: {
+          top_lines: [{ moves_uci: ["g1f3"] }],
+        },
+      },
+    ],
+  };
+
+  expect(reviewArrowUcis(0, moves, analysis)).toEqual({
+    nextPlayed: "e2e4",
+    best: "d2d4",
+  });
+  expect(reviewArrowUcis(1, moves, analysis)).toEqual({
+    nextPlayed: "e7e5",
+    best: "c7c5",
+  });
+  expect(reviewArrowUcis(2, moves, analysis)).toEqual({
+    nextPlayed: null,
+    best: "g1f3",
+  });
 });
 
 test("formats internal plies as chess full moves", () => {

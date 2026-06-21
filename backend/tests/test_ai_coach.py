@@ -11,6 +11,7 @@ from backend.ai_coach import (
     _build_prompt,
     _condense_analysis,
     _ground_explanation,
+    _ground_lesson,
     _required_coaching_points,
     _response_json_schema,
     _word_count,
@@ -158,8 +159,9 @@ class AICoachValidationTests(unittest.TestCase):
         self.assertIn('"required_coaching_points"', prompt)
         self.assertIn("Never say \"only move\"", prompt)
         self.assertIn('"study"', prompt)
-        self.assertIn("70-140 words", prompt)
-        self.assertIn("hard maximum of 180 words", prompt)
+        self.assertIn("45-110 words", prompt)
+        self.assertIn("hard maximum of 150 words", prompt)
+        self.assertIn("Do not explain centipawn thresholds", prompt)
         self.assertNotIn('"lichess.fake.statistic"', prompt)
 
     def test_condensed_analysis_includes_adjacent_position_context(self):
@@ -391,7 +393,7 @@ class AICoachValidationTests(unittest.TestCase):
         self.assertIn("now defended", explanation)
         self.assertIn("motifs.f2_f7_weakness", refs)
 
-    def test_grounding_enforces_quality_label_metric_and_eval_vocabulary(self):
+    def test_grounding_enforces_quality_label_without_metric_noise(self):
         position = {
             "decision_context": {
                 "move_classification": {
@@ -414,10 +416,139 @@ class AICoachValidationTests(unittest.TestCase):
             position,
         )
         self.assertIn("inaccuracy", explanation)
-        self.assertIn("62 centipawns", explanation)
+        self.assertNotIn("centipawns", explanation)
+        self.assertNotIn("win probability", explanation)
         self.assertNotIn("mistake", explanation)
         self.assertNotIn("clear advantage", explanation)
+        self.assertEqual(refs, set())
+
+    def test_grounding_explains_abandoned_mate_square_and_specific_lesson(self):
+        position = {
+            "played_move": {"san": "Qxc3", "uci": "d2c3"},
+            "decision_context": {
+                "move_quality": "allows_forced_mate",
+                "move_classification": {"label": "blunder"},
+                "assessment_before": {
+                    "classification": "decisive_advantage",
+                    "leader": "black",
+                },
+                "engine_first_choice": {"san": "Nxc3"},
+                "reply_tactics": {
+                    "actual_matches_best": True,
+                    "actual_reply": {
+                        "move": {"san": "Qc1#", "uci": "b2c1"},
+                        "gives_checkmate": True,
+                        "target_square": "c1",
+                        "defenders_before_played_move": [
+                            {"piece": "queen", "square": "d2"}
+                        ],
+                        "defenders_after_played_move": [],
+                        "moved_piece_was_lost_defender": {
+                            "piece": "queen",
+                            "square": "d2",
+                        },
+                        "new_absolute_pins": [],
+                    },
+                },
+            },
+            "stockfish": {
+                "top_lines": [{"moves_san": ["Qc1#"]}]
+            },
+            "motifs": [
+                {
+                    "id": "forced_mate",
+                    "extra": {
+                        "defending_king_square": "e1",
+                        "safe_adjacent_square_count": 0,
+                        "mate_line_san": ["Qc1#"],
+                    },
+                }
+            ],
+        }
+        explanation, refs = _ground_explanation(
+            "Capturing the bishop on c3 with the queen is a blunder that "
+            "allows black to deliver a forced mate. By taking the bishop, "
+            "white walks into a tactical trap and loses the game immediately. "
+            "This move is a significant error that changes the evaluation. "
+            "It is a critical blunder that overlooks the tactical threats.",
+            position,
+        )
+        lesson = _ground_lesson(
+            "Always be aware of tactical threats.",
+            position,
+        )
+
+        self.assertIn("c1 loses its only defender", explanation)
+        self.assertIn("Qc1#", explanation)
+        self.assertEqual(explanation.lower().count("blunder"), 1)
+        self.assertNotIn("changes the evaluation", explanation)
         self.assertIn("decision_context", refs)
+        self.assertIn("guarding c1", lesson)
+
+    def test_grounding_explains_pin_that_neutralizes_queen_attack(self):
+        position = {
+            "played_move": {"san": "Bc3", "uci": "d2c3"},
+            "decision_context": {
+                "move_classification": {"label": "blunder"},
+                "engine_first_choice": {"san": "Nc3"},
+                "engine_choice_effects": {
+                    "move": {"san": "Nc3", "uci": "b1c3"},
+                    "moved_piece": {
+                        "piece": "knight",
+                        "from": "b1",
+                        "to": "c3",
+                    },
+                    "develops_minor_piece": True,
+                    "newly_defended_friendly_pieces": [
+                        {
+                            "piece": "rook",
+                            "square": "a1",
+                            "under_enemy_pressure": True,
+                            "new_defenders": [
+                                {"piece": "queen", "square": "d1"}
+                            ],
+                        }
+                    ],
+                },
+                "reply_tactics": {
+                    "actual_matches_best": True,
+                    "actual_reply": {
+                        "move": {"san": "Bb4", "uci": "f8b4"},
+                        "new_absolute_pins": [
+                            {
+                                "piece": "bishop",
+                                "square": "c3",
+                                "king": "e1",
+                                "attacked_enemy_pieces_before_pin": [
+                                    {
+                                        "piece": "queen",
+                                        "square": "b2",
+                                        "attacks_friendly_pieces": [
+                                            {
+                                                "piece": "rook",
+                                                "square": "a1",
+                                            }
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                },
+            },
+            "motifs": [],
+        }
+        explanation, _refs = _ground_explanation(
+            "Moving the bishop to c3 is a blunder that allows black to gain a "
+            "decisive advantage. The position collapses and White is worse.",
+            position,
+        )
+
+        self.assertIn("Bb4 pins the bishop on c3", explanation)
+        self.assertIn("queen on b2", explanation)
+        self.assertIn("rook on a1", explanation)
+        self.assertIn("Nc3 develops the knight from b1", explanation)
+        self.assertIn("queen on d1", explanation)
 
     def test_grounding_adds_best_defense_and_material_context(self):
         position = {

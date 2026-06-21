@@ -369,6 +369,82 @@ class AnalysisTests(unittest.TestCase):
             effects["newly_defended_friendly_pieces"],
         )
 
+    def test_reply_effects_connect_abandoned_c1_defense_to_mate(self):
+        game = chess.pgn.read_game(
+            io.StringIO(
+                "1. d4 e5 2. dxe5 Nc6 3. Nf3 Qe7 4. Bf4 Qb4+ "
+                "5. Bd2 Qxb2 6. Bc3 Bb4 7. Qd2 Bxc3 "
+                "8. Qxc3 Qc1#"
+            )
+        )
+        records, _total = analysis._position_records(game, max_plies=20)
+        effects = analysis._reply_effects(
+            records[14],
+            "b2c1",
+            "Qc1#",
+        )
+
+        self.assertTrue(effects["gives_checkmate"])
+        self.assertEqual(effects["target_square"], "c1")
+        self.assertEqual(
+            effects["moved_piece_was_lost_defender"],
+            {"piece": "queen", "square": "d2"},
+        )
+        self.assertEqual(effects["defenders_after_played_move"], [])
+
+    def test_reply_effects_explain_b4_pin_and_rook_pressure(self):
+        game = chess.pgn.read_game(
+            io.StringIO(
+                "1. d4 e5 2. dxe5 Nc6 3. Nf3 Qe7 4. Bf4 Qb4+ "
+                "5. Bd2 Qxb2 6. Bc3 Bb4 *"
+            )
+        )
+        records, _total = analysis._position_records(game, max_plies=20)
+        effects = analysis._reply_effects(
+            records[10],
+            "f8b4",
+            "Bb4",
+        )
+        pin = effects["new_absolute_pins"][0]
+
+        self.assertEqual(
+            {key: pin[key] for key in ("piece", "square", "king")},
+            {"piece": "bishop", "square": "c3", "king": "e1"},
+        )
+        queen = next(
+            target
+            for target in pin["attacked_enemy_pieces_before_pin"]
+            if target["square"] == "b2"
+        )
+        self.assertIn(
+            {"piece": "rook", "square": "a1"},
+            queen["attacks_friendly_pieces"],
+        )
+
+    def test_engine_choice_effects_show_development_and_new_rook_defense(self):
+        game = chess.pgn.read_game(
+            io.StringIO(
+                "1. d4 e5 2. dxe5 Nc6 3. Nf3 Qe7 4. Bf4 Qb4+ "
+                "5. Bd2 Qxb2 *"
+            )
+        )
+        records, _total = analysis._position_records(game, max_plies=20)
+        effects = analysis._candidate_move_effects(
+            records[-1]["fen"],
+            "b1c3",
+        )
+
+        self.assertTrue(effects["develops_minor_piece"])
+        rook = next(
+            piece
+            for piece in effects["newly_defended_friendly_pieces"]
+            if piece["square"] == "a1"
+        )
+        self.assertIn(
+            {"piece": "queen", "square": "d1"},
+            rook["new_defenders"],
+        )
+
     def test_critical_multipv_prioritizes_engine_first_tactical_responses(self):
         records = [
             {

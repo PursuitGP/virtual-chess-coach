@@ -34,6 +34,7 @@ import {
   movePositionLabel,
   pointColor,
   readJsonResponse,
+  reviewArrowUcis,
 } from "./analysisUtils";
 import "./App.css";
 
@@ -59,8 +60,8 @@ const REVIEW_ARROW_BRUSHES = {
     opacity: 0.9,
     lineWidth: 11,
   },
-  reviewPlayed: {
-    key: "review-played",
+  reviewNext: {
+    key: "review-next",
     color: "#60a5fa",
     opacity: 0.72,
     lineWidth: 9,
@@ -211,15 +212,17 @@ export default function App() {
   );
   const currentExplanation = explanationMap.get(plyIndex) || null;
   const reviewArrows = useMemo(() => {
-    if (!showMoveArrows || !currentRecord) return [];
-    const playedUci = currentRecord.played_move?.uci;
-    const bestUci =
-      currentRecord.decision_context?.engine_first_choice?.uci || null;
-    const played = moveArrow(playedUci, "reviewPlayed");
+    if (!showMoveArrows || !analysis) return [];
+    const { nextPlayed: nextPlayedUci, best: bestUci } = reviewArrowUcis(
+      plyIndex,
+      pgnMoves,
+      analysis
+    );
+    const nextPlayed = moveArrow(nextPlayedUci, "reviewNext");
     const best = moveArrow(bestUci, "reviewBest");
-    if (bestUci && bestUci === playedUci) return best ? [best] : [];
-    return [played, best].filter(Boolean);
-  }, [currentRecord, showMoveArrows]);
+    if (bestUci && bestUci === nextPlayedUci) return best ? [best] : [];
+    return [nextPlayed, best].filter(Boolean);
+  }, [analysis, pgnMoves, plyIndex, showMoveArrows]);
 
   const lastMove =
     plyIndex > 0 && pgnMoves[plyIndex - 1]
@@ -696,10 +699,10 @@ export default function App() {
                   className={`arrow-toggle ${showMoveArrows ? "active" : ""}`}
                   aria-pressed={showMoveArrows}
                   onClick={() => setShowMoveArrows((value) => !value)}
-                  title="Show the played move and Stockfish's first choice"
+                  title="Preview the next PGN move and Stockfish's best move from this position"
                 >
-                  <span className="arrow-key played" aria-hidden="true" />
-                  Played
+                  <span className="arrow-key next" aria-hidden="true" />
+                  Next
                   <span className="arrow-key best" aria-hidden="true" />
                   Best
                 </button>
@@ -1018,6 +1021,17 @@ export default function App() {
                         []
                       ).join(" ") || "Unavailable"}
                     </p>
+                    <details className="evaluation-help">
+                      <summary>What does the evaluation mean?</summary>
+                      <p className="line">
+                        Positive values favor White and negative values favor
+                        Black. One point is roughly comparable to a pawn, but it
+                        is not a guaranteed result. Mate values mean Stockfish
+                        sees a forced checkmate. Move labels are based on the
+                        change in winning chances; the coach focuses on the
+                        board reason behind that change.
+                      </p>
+                    </details>
                     <div className="evidence-row">
                       <span>Move necessity</span>
                       <strong>

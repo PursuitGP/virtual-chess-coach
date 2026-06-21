@@ -503,6 +503,276 @@ def _move_piece_effects(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _piece_at_details(
+    board: chess.Board,
+    square: chess.Square,
+) -> dict[str, Any] | None:
+    piece = board.piece_at(square)
+    if piece is None:
+        return None
+    return {
+        "piece": chess.piece_name(piece.piece_type),
+        "square": chess.square_name(square),
+    }
+
+
+def _attacker_details(
+    board: chess.Board,
+    color: chess.Color,
+    square: chess.Square,
+) -> list[dict[str, Any]]:
+    details = []
+    for attacker in sorted(board.attackers(color, square)):
+        piece = _piece_at_details(board, attacker)
+        if piece:
+            details.append(piece)
+    return details
+
+
+def _candidate_move_effects(
+    fen: str,
+    move_uci: str | None,
+) -> dict[str, Any]:
+    if not move_uci:
+        return {}
+    try:
+        before = chess.Board(fen)
+        move = chess.Move.from_uci(move_uci)
+    except (TypeError, ValueError):
+        return {}
+    if move not in before.legal_moves:
+        return {}
+
+    moved_piece = before.piece_at(move.from_square)
+    if moved_piece is None:
+        return {}
+    captured_piece = before.piece_at(move.to_square)
+    after = before.copy(stack=False)
+    after.push(move)
+
+    newly_defended = []
+    newly_attacked = []
+    for square, piece in after.piece_map().items():
+        if piece.color == moved_piece.color:
+            previous_defenders = {
+                attacker
+                for attacker in before.attackers(moved_piece.color, square)
+                if attacker != square
+            }
+            resulting_defenders = {
+                attacker
+                for attacker in after.attackers(moved_piece.color, square)
+                if attacker != square
+            }
+            added = resulting_defenders - previous_defenders
+            if added:
+                newly_defended.append(
+                    {
+                        "piece": chess.piece_name(piece.piece_type),
+                        "square": chess.square_name(square),
+                        "under_enemy_pressure": bool(
+                            after.attackers(not moved_piece.color, square)
+                        ),
+                        "new_defenders": [
+                            detail
+                            for attacker in sorted(added)
+                            if (
+                                detail := _piece_at_details(after, attacker)
+                            )
+                        ],
+                    }
+                )
+        else:
+            was_attacked = bool(
+                before.attackers(moved_piece.color, square)
+            )
+            is_attacked = bool(after.attackers(moved_piece.color, square))
+            if is_attacked and not was_attacked:
+                newly_attacked.append(
+                    {
+                        "piece": chess.piece_name(piece.piece_type),
+                        "square": chess.square_name(square),
+                    }
+                )
+
+    piece_priority = {
+        "queen": 5,
+        "rook": 4,
+        "bishop": 3,
+        "knight": 3,
+        "pawn": 2,
+        "king": 1,
+    }
+    newly_defended.sort(
+        key=lambda item: (
+            not item["under_enemy_pressure"],
+            -piece_priority.get(item["piece"], 0),
+            item["square"],
+        )
+    )
+    home_rank = 0 if moved_piece.color == chess.WHITE else 7
+    develops_minor_piece = (
+        moved_piece.piece_type in {chess.KNIGHT, chess.BISHOP}
+        and chess.square_rank(move.from_square) == home_rank
+        and chess.square_rank(move.to_square) != home_rank
+    )
+    return {
+        "move": {
+            "uci": move.uci(),
+            "san": before.san(move),
+        },
+        "moved_piece": {
+            "piece": chess.piece_name(moved_piece.piece_type),
+            "from": chess.square_name(move.from_square),
+            "to": chess.square_name(move.to_square),
+        },
+        "captured_piece": (
+            {
+                "piece": chess.piece_name(captured_piece.piece_type),
+                "square": chess.square_name(move.to_square),
+            }
+            if captured_piece
+            else None
+        ),
+        "develops_minor_piece": develops_minor_piece,
+        "newly_defended_friendly_pieces": newly_defended[:6],
+        "newly_attacked_enemy_pieces": newly_attacked[:6],
+    }
+
+
+def _reply_effects(
+    record: dict[str, Any],
+    move_uci: str | None,
+    move_san: str | None = None,
+) -> dict[str, Any]:
+    if not move_uci:
+        return {}
+    try:
+        before_played = chess.Board(record["previous_fen"])
+        current = chess.Board(record["fen"])
+        played_move = chess.Move.from_uci(record["played_move"]["uci"])
+        reply = chess.Move.from_uci(move_uci)
+    except (KeyError, TypeError, ValueError):
+        return {}
+    if reply not in current.legal_moves:
+        return {}
+
+    mover_color = not current.turn
+    reply_target = reply.to_square
+    defenders_before = _attacker_details(
+        before_played,
+        mover_color,
+        reply_target,
+    )
+    defenders_after = _attacker_details(
+        current,
+        mover_color,
+        reply_target,
+    )
+    defender_squares_after = {
+        detail["square"] for detail in defenders_after
+    }
+    lost_defenders = [
+        detail
+        for detail in defenders_before
+        if detail["square"] not in defender_squares_after
+    ]
+    moved_defender = next(
+        (
+            detail
+            for detail in lost_defenders
+            if detail["square"] == chess.square_name(played_move.from_square)
+            and chess.square_name(played_move.to_square)
+            not in defender_squares_after
+        ),
+        None,
+    )
+
+    after_reply = current.copy(stack=False)
+    san = move_san or current.san(reply)
+    after_reply.push(reply)
+    newly_pinned = []
+    for square, piece in current.piece_map().items():
+        if piece.color != mover_color or piece.piece_type == chess.KING:
+            continue
+        if current.is_pinned(mover_color, square):
+            continue
+        if not after_reply.is_pinned(mover_color, square):
+            continue
+
+        attacked_enemy_pieces = []
+        for target in sorted(current.attacks(square)):
+            target_piece = current.piece_at(target)
+            if target_piece is None or target_piece.color == mover_color:
+                continue
+            target_details = _piece_at_details(current, target)
+            if target_details is None:
+                continue
+            target_details["attacks_friendly_pieces"] = [
+                detail
+                for attacked_square in sorted(current.attacks(target))
+                if (
+                    (attacked_piece := current.piece_at(attacked_square))
+                    and attacked_piece.color == mover_color
+                    and (
+                        detail := _piece_at_details(current, attacked_square)
+                    )
+                )
+            ][:6]
+            attacked_enemy_pieces.append(target_details)
+
+        newly_pinned.append(
+            {
+                "piece": chess.piece_name(piece.piece_type),
+                "square": chess.square_name(square),
+                "king": chess.square_name(after_reply.king(mover_color)),
+                "attacked_enemy_pieces_before_pin": attacked_enemy_pieces[:4],
+            }
+        )
+
+    return {
+        "move": {"uci": reply.uci(), "san": san},
+        "gives_check": after_reply.is_check(),
+        "gives_checkmate": after_reply.is_checkmate(),
+        "target_square": chess.square_name(reply_target),
+        "defenders_before_played_move": defenders_before,
+        "defenders_after_played_move": defenders_after,
+        "lost_defenders": lost_defenders,
+        "moved_piece_was_lost_defender": moved_defender,
+        "new_absolute_pins": newly_pinned,
+    }
+
+
+def _reply_tactical_context(
+    record: dict[str, Any],
+    next_record: dict[str, Any] | None,
+) -> dict[str, Any]:
+    stockfish = record.get("stockfish") or {}
+    first_line = (stockfish.get("top_lines") or [{}])[0]
+    best_uci = ((first_line.get("moves_uci") or [None])[0])
+    best_san = ((first_line.get("moves_san") or [None])[0])
+    actual_move = (next_record or {}).get("played_move") or {}
+    actual_uci = actual_move.get("uci")
+    actual_san = actual_move.get("san")
+    actual_matches_best = bool(
+        actual_uci and best_uci and actual_uci == best_uci
+    )
+
+    best_reply = _reply_effects(record, best_uci, best_san)
+    actual_reply = (
+        None
+        if actual_matches_best
+        else _reply_effects(record, actual_uci, actual_san)
+    )
+    if not best_reply and not actual_reply:
+        return {}
+    return {
+        "best_reply": best_reply or None,
+        "actual_reply": actual_reply or None,
+        "actual_matches_best": actual_matches_best,
+    }
+
+
 def _mover_engine_utility(
     evaluation: dict[str, Any] | None,
     mover: str,
@@ -674,6 +944,10 @@ def add_decision_context(
                 "line_san": previous_moves_san,
                 "line_uci": previous_moves_uci,
             },
+            "engine_choice_effects": _candidate_move_effects(
+                record["previous_fen"],
+                engine_first_uci,
+            ),
             "played_matches_engine_first": played_matches,
             "critical_tactical_position": tactical_before,
             "critical_engine_response": played_matches and tactical_before,
@@ -686,6 +960,13 @@ def add_decision_context(
         }
         previous_stockfish = record["stockfish"]
         previous_motifs = record.get("motifs") or []
+
+    for index, record in enumerate(records):
+        next_record = records[index + 1] if index + 1 < len(records) else None
+        record["decision_context"]["reply_tactics"] = _reply_tactical_context(
+            record,
+            next_record,
+        )
 
 
 def _analyse_stockfish_position(

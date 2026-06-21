@@ -599,7 +599,7 @@ label {
   border-radius: 999px;
 }
 
-.arrow-key.played {
+.arrow-key.next {
   background: #60a5fa;
 }
 
@@ -831,6 +831,24 @@ label {
 .opening-context {
   border-left: 2px solid var(--accent-strong);
   padding-left: 0.65rem;
+}
+
+.evaluation-help {
+  margin: 0.7rem 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 0.55rem 0;
+}
+
+.evaluation-help summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.evaluation-help .line {
+  margin-bottom: 0;
 }
 
 .candidate-list {

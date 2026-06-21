@@ -37,8 +37,9 @@ PGN
 - Recreate a game manually on a legal-move board and submit the generated PGN
 - Normalize common PGN formatting problems
 - Display game metadata and replay every legal move on a Chessground board
-- Toggle review arrows for the played move and Stockfish's first choice while
-  retaining Chessground's right-click drawing controls
+- Toggle review arrows for the next PGN move and Stockfish's best move from the
+  position currently on the board while retaining Chessground's right-click
+  drawing controls
 - Navigate with buttons or arrow, Home, and End keys
 - Inspect the current FEN and evaluation history
 
@@ -88,8 +89,9 @@ The Fried Liver line `1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 d5 5. exd5 Nxd5 6. N
 - Uploading a game automatically runs evidence collection followed by AI coaching
 - Perspective can be White, Black, or both
 - Gemini must return one validated object for every analyzed ply
-- Explanations target roughly 70–140 position-specific words, with a 180-word
-  readability ceiling, and receive the
+- Explanations target roughly 45–110 position-specific words, with a 150-word
+  readability ceiling, prioritize the concrete board mechanism over evaluation
+  methodology, and receive the
   previous position, the current evidence, and the opponent's next played move
 - Every explanation identifies the Stockfish, Lichess, study, or motif evidence it used
 - Misaligned moves, missing plies, malformed JSON, and invented evidence references are rejected

@@ -10,10 +10,10 @@ import time
 from typing import Any
 
 
-PROMPT_VERSION = "2026-06-20.7"
+PROMPT_VERSION = "2026-06-21.8"
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 VALID_PERSPECTIVES = {"white", "black", "both"}
-MAX_EXPLANATION_WORDS = 180
+MAX_EXPLANATION_WORDS = 150
 
 
 class AIConfigurationError(Exception):
@@ -232,37 +232,91 @@ def _required_coaching_points(position: dict[str, Any]) -> list[str]:
     move_choice = decision.get("move_choice") or {}
     move_classification = decision.get("move_classification") or {}
     move_effects = decision.get("move_effects") or {}
+    reply_tactics = decision.get("reply_tactics") or {}
+    engine_effects = decision.get("engine_choice_effects") or {}
 
     points.append(
-        "Describe what the played move concretely changes on this board."
+        "Lead with the concrete board reason the move works or fails. A verdict "
+        "without the mechanism is not useful coaching."
     )
+    tactical_reply = (
+        reply_tactics.get("actual_reply")
+        if reply_tactics.get("actual_matches_best")
+        else None
+    ) or reply_tactics.get("best_reply") or reply_tactics.get("actual_reply") or {}
+    moved_defender = tactical_reply.get("moved_piece_was_lost_defender")
+    reply_move = (tactical_reply.get("move") or {}).get("san")
+    if moved_defender:
+        target_square = tactical_reply.get("target_square")
+        consequence = (
+            ", which delivers checkmate"
+            if tactical_reply.get("gives_checkmate")
+            else ""
+        )
+        points.append(
+            f"Explain that moving the {moved_defender.get('piece')} away from "
+            f"{moved_defender.get('square')} abandons its defense of "
+            f"{target_square}, allowing {reply_move}{consequence}."
+        )
+
+    new_pins = tactical_reply.get("new_absolute_pins") or []
+    if new_pins:
+        pin = new_pins[0]
+        attacked = pin.get("attacked_enemy_pieces_before_pin") or []
+        target = attacked[0] if attacked else {}
+        pressure = target.get("attacks_friendly_pieces") or []
+        pressure_text = (
+            f", which keeps pressure on the {pressure[0].get('piece')} on "
+            f"{pressure[0].get('square')}"
+            if pressure
+            else ""
+        )
+        points.append(
+            f"Explain that {reply_move} pins the {pin.get('piece')} on "
+            f"{pin.get('square')} to the king on {pin.get('king')}. Before the "
+            f"pin it attacked the {target.get('piece')} on "
+            f"{target.get('square')}; after the pin that attack is unusable"
+            f"{pressure_text}."
+        )
+
+    engine_move = (engine_effects.get("move") or {}).get("san")
+    newly_defended_by_engine = [
+        piece
+        for piece in (
+            engine_effects.get("newly_defended_friendly_pieces") or []
+        )
+        if piece.get("under_enemy_pressure")
+        and piece.get("piece") in {"queen", "rook", "bishop", "knight"}
+    ]
+    if engine_move and newly_defended_by_engine:
+        defended = newly_defended_by_engine[0]
+        defender = (defended.get("new_defenders") or [{}])[0]
+        development = (
+            " develops a new minor piece and"
+            if engine_effects.get("develops_minor_piece")
+            else ""
+        )
+        points.append(
+            f"Contrast the played move with {engine_move}: it{development} makes "
+            f"the {defender.get('piece')} on {defender.get('square')} a new "
+            f"defender of the {defended.get('piece')} on "
+            f"{defended.get('square')}."
+        )
+
     classification = move_classification.get("label")
     if classification in {"inaccuracy", "mistake", "blunder"}:
         points.append(
-            f"Use the deterministic label {classification!r}, defined here as: "
-            f"{move_classification.get('definition')} The measured centipawn "
-            f"loss is {move_classification.get('centipawn_loss')} and the "
-            "estimated win-probability loss is "
-            f"{move_classification.get('estimated_win_probability_loss_pct')} "
-            "percentage points."
+            f"Use the deterministic label {classification!r} at most once. Do "
+            "not explain the classification thresholds, centipawn loss, or "
+            "modeled winning-chance percentage in the coaching prose."
         )
     if decision.get("move_quality") == "allows_forced_mate":
-        points.extend(
-            [
-                (
-                    "State that before this move the position was "
-                    f"{before.get('classification')} for "
-                    f"{before.get('leader') or 'neither side'}, not a forced mate."
-                ),
-                (
-                    f"Name {engine_choice.get('san')} as the engine's first "
-                    "defensive choice instead of the played move."
-                ),
-                (
-                    "State that the played move changes the evaluation to "
-                    f"forced mate for {after.get('leader')}."
-                ),
-            ]
+        points.append(
+            "In no more than one sentence, state that this was not a forced "
+            f"mate before the move, contrast it with the new forced mate, and name "
+            f"{engine_choice.get('san')} as the engine's first defense. Spend "
+            "the remaining explanation on the mating mechanism, not repeated "
+            "verdict language."
         )
     if decision.get("only_move") is True:
         alternatives = move_choice.get("alternatives") or []
@@ -327,11 +381,15 @@ def _required_coaching_points(position: dict[str, Any]) -> list[str]:
             safe_count = extra.get("safe_adjacent_square_count")
             king_square = extra.get("defending_king_square")
             line = extra.get("mate_line_san") or []
-            points.append(
-                f"Explain that the king on {king_square} has {safe_count} "
-                "immediately safe adjacent squares and connect that confinement "
-                "to the mating attack."
-            )
+            if not (
+                moved_defender
+                and tactical_reply.get("gives_checkmate")
+            ):
+                points.append(
+                    f"Explain that the king on {king_square} has {safe_count} "
+                    "immediately safe adjacent squares and connect that "
+                    "confinement to the mating attack."
+                )
             if line:
                 points.append(
                     "Use the supplied mating line: " + " ".join(line) + "."
@@ -358,7 +416,11 @@ def _required_coaching_points(position: dict[str, Any]) -> list[str]:
         )
         if piece.get("under_enemy_pressure")
     ]
-    if newly_defended:
+    if newly_defended and classification not in {
+        "inaccuracy",
+        "mistake",
+        "blunder",
+    }:
         moved_piece = move_effects.get("moved_piece") or {}
         defended = ", ".join(
             f"{piece.get('piece')} on {piece.get('square')}"
@@ -392,7 +454,7 @@ def _required_coaching_points(position: dict[str, Any]) -> list[str]:
             "Treat this as a routine opening move: emphasize its human purpose "
             "and omit generic engine endorsement."
         )
-    return points[:6]
+    return points[:8]
 
 
 def _condense_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
@@ -476,19 +538,23 @@ Rules:
      "ply": 1,
      "move": "e4",
      "side": "white",
-     "explanation": "Position-specific coaching, usually 70-140 words.",
+     "explanation": "Position-specific coaching, usually 45-110 words.",
      "lesson": "One concise practical lesson.",
      "evidence_refs": ["stockfish.evaluation", "lichess.players.played_move"]
    }}]}}
 2. Return exactly one object for every supplied position, in the same order.
 3. Copy ply, move, and side exactly from the evidence package.
-4. Aim for 70-140 words in explanation, with a hard maximum of 180 words.
+4. Aim for 45-110 words in explanation, with a hard maximum of 150 words.
    Sentence count is flexible; use as many clear sentences as the position
    genuinely needs. Explain what the move changed, the concrete target or
    motif, the opponent's practical problem, and why the engine/context
    supports the conclusion. Do not pad the answer with generic opening
    principles. Every item in required_coaching_points is mandatory. Combine
    related items when useful, but do not omit one.
+   Lead with the causal mechanism. Mention the move label or evaluation change
+   at most once, then make every remaining sentence add a new piece, square,
+   threat, defensive duty, or useful alternative. Never paraphrase "the move
+   is bad and the position is worse" in several different ways.
 5. Never invent moves, variations, probabilities, opening names, evaluations,
    or tactical claims.
 6. A move or variation may be named only when it appears in stockfish.top_lines,
@@ -511,6 +577,10 @@ Rules:
    mistake, and blunder. Never infer or upgrade one of those labels yourself.
    move_effects identifies friendly pieces newly defended by the moved piece;
    do not call one of those pieces newly loose or vulnerable.
+   reply_tactics identifies concrete consequences of the best or actual reply,
+   including abandoned defensive squares and newly created absolute pins.
+   engine_choice_effects explains useful board changes made by the engine's
+   preferred alternative.
 10. If decision_context.move_quality is "allows_forced_mate", explicitly say
     that the position was not previously lost by force, name the engine's best
     defense, and explain the new mating mechanism from the forced_mate motif
@@ -540,8 +610,10 @@ Rules:
    motif is useful context but must be phrased cautiously and corroborated with
    Stockfish where it affects move quality.
 17. Distinguish engine-backed conclusions from coaching interpretation.
-18. Explain evaluation changes naturally, but numeric values may be used when
-   they improve clarity.
+18. Do not explain centipawn thresholds, modeled winning-chance percentages, or
+    the move-classification formula in coaching prose. Those metrics belong in
+    supporting analysis. Use a number only when it directly clarifies a mate
+    distance, material count, or concrete variation.
 19. Avoid generic advice that is not tied to this position.
 20. Every evidence_refs item must identify evidence actually used. For each
     ply, copy references only from that position's available_evidence_refs
@@ -566,6 +638,9 @@ Rules:
     are optional human context and never override Stockfish, the actual board,
     or structured motifs. Do not browse the internet or invent historical
     opening background.
+29. The practical lesson must be a reusable decision check tied to this exact
+    mechanism. Avoid empty advice such as "watch for tactics," "be careful,"
+    "winning material is good," or "develop your pieces."
 
 Perspective: {perspective}
 Prompt version: {PROMPT_VERSION}
@@ -661,13 +736,154 @@ def _assessment_phrase(assessment: dict[str, Any]) -> str:
     return labels.get(classification, classification or "unclear")
 
 
+def _select_tactical_reply(decision: dict[str, Any]) -> dict[str, Any]:
+    reply_tactics = decision.get("reply_tactics") or {}
+    actual = reply_tactics.get("actual_reply") or {}
+    best = reply_tactics.get("best_reply") or {}
+    if reply_tactics.get("actual_matches_best"):
+        return actual or best
+    if (
+        actual.get("moved_piece_was_lost_defender")
+        or actual.get("new_absolute_pins")
+    ):
+        return actual
+    return best or actual
+
+
+def _prune_low_information_sentences(sentences: list[str]) -> list[str]:
+    def is_concrete(sentence: str) -> bool:
+        squares = re.findall(r"\b[a-h][1-8]\b", sentence.lower())
+        mechanism = re.search(
+            r"\b(?:defend|guard|pin|fork|attack|block|open(?:s|ed|ing)? "
+            r"(?:a )?line|overload|trapped|cannot move|cannot chase)\b",
+            sentence,
+            re.I,
+        )
+        return len(set(squares)) >= 2 or bool(squares and mechanism)
+
+    has_concrete_mechanism = any(is_concrete(sentence) for sentence in sentences)
+    pruned = []
+    verdict_seen = False
+    for sentence in sentences:
+        lower = sentence.lower()
+        if (
+            "under this review's thresholds" in lower
+            or "modeled winning-chance" in lower
+            or (
+                "centipawn" in lower
+                and (
+                    "percentage point" in lower
+                    or "win probability" in lower
+                    or "winning chance" in lower
+                )
+            )
+        ):
+            continue
+
+        verdict = bool(
+            re.search(
+                r"\b(?:inaccuracy|mistake|blunder|error|forced mate|"
+                r"decisive advantage|lost position)\b",
+                lower,
+            )
+        )
+        generic_recap = bool(
+            re.search(
+                r"\b(?:significant error|critical (?:blunder|error)|"
+                r"tactical trap|"
+                r"changes? the evaluation|position collapses|"
+                r"overlooks? (?:the )?tactical threats?|"
+                r"leads? to (?:an )?(?:immediate )?(?:loss|lost position)|"
+                r"ends? the game (?:immediately)?|"
+                r"fails? to address (?:the )?(?:multiple )?threats?)\b",
+                lower,
+            )
+        )
+        if has_concrete_mechanism and verdict and not is_concrete(sentence):
+            continue
+        if verdict_seen and generic_recap:
+            continue
+        if verdict:
+            verdict_seen = True
+        pruned.append(sentence)
+    return pruned
+
+
+def _ground_lesson(lesson: str, position: dict[str, Any]) -> str:
+    decision = position.get("decision_context") or {}
+    reply = _select_tactical_reply(decision)
+    moved_defender = reply.get("moved_piece_was_lost_defender")
+    if moved_defender:
+        target = reply.get("target_square")
+        if (
+            "defend" not in lesson.lower()
+            or (target and target.lower() not in lesson.lower())
+        ):
+            return (
+                f"Before moving a sole defender, check whether it is guarding "
+                f"{target} against a forcing check or mate."
+            )
+
+    pins = reply.get("new_absolute_pins") or []
+    pin_lesson_specific = (
+        "pin" in lesson.lower()
+        and "queen" in lesson.lower()
+        and (
+            "attack" in lesson.lower()
+            or "move" in lesson.lower()
+            or "unusable" in lesson.lower()
+        )
+    )
+    if pins and not pin_lesson_specific:
+        return (
+            f"When a piece attacks a queen, check whether a pin to the king can "
+            f"make that attack unusable."
+        )
+    return lesson.strip()
+
+
 def _ground_explanation(
     explanation: str,
     position: dict[str, Any],
 ) -> tuple[str, set[str]]:
-    sentences = _split_sentences(explanation)
+    sentences = _prune_low_information_sentences(
+        _split_sentences(explanation)
+    )
     extra_refs: set[str] = set()
     decision = position.get("decision_context") or {}
+    tactical_reply = _select_tactical_reply(decision)
+    if not tactical_reply.get("moved_piece_was_lost_defender"):
+        sentences = [
+            sentence
+            for sentence in sentences
+            if not re.search(
+                r"\b(?:abandons?|leaves?) (?:the )?(?:defense|defence)\b",
+                sentence,
+                re.I,
+            )
+        ]
+    else:
+        target = tactical_reply.get("target_square")
+        reply_move = (tactical_reply.get("move") or {}).get("san")
+        has_fully_concrete_sentence = any(
+            target
+            and target.lower() in sentence.lower()
+            and "defend" in sentence.lower()
+            and reply_move
+            and reply_move.lower() in sentence.lower()
+            for sentence in sentences
+        )
+        if has_fully_concrete_sentence:
+            sentences = [
+                sentence
+                for sentence in sentences
+                if not (
+                    target
+                    and target.lower() in sentence.lower()
+                    and "defend" in sentence.lower()
+                    and reply_move.lower() not in sentence.lower()
+                )
+            ]
     routine_opening = (
         (position.get("ply") or 0) <= 4
         and not decision.get("critical_tactical_position")
@@ -732,6 +948,16 @@ def _ground_explanation(
                 )
                 for sentence in sentences
             ]
+        if classification == "inaccuracy":
+            sentences = [
+                re.sub(
+                    r"\ba inaccuracy\b",
+                    "an inaccuracy",
+                    sentence,
+                    flags=re.I,
+                )
+                for sentence in sentences
+            ]
         explanation_lower = " ".join(sentences).lower()
     else:
         explanation_lower = " ".join(sentences).lower()
@@ -783,33 +1009,6 @@ def _ground_explanation(
             additions.append("; ".join(clauses) + ".")
         extra_refs.add("motifs.fork")
 
-    classification_data = decision.get("move_classification") or {}
-    if classification in {"inaccuracy", "mistake", "blunder"} and (
-        classification not in explanation_lower
-        or not re.search(
-            r"\b(?:centipawn|percentage point|winning chance|win probability|"
-            r"forced mate)\b",
-            explanation_lower,
-        )
-    ):
-        cp_loss = classification_data.get("centipawn_loss")
-        probability_loss = classification_data.get(
-            "estimated_win_probability_loss_pct"
-        )
-        if classification_data.get("consequence") == "allows_forced_mate":
-            additions.append(
-                "This review classifies the move as a blunder because it newly "
-                "allows a forced mate."
-            )
-        else:
-            additions.append(
-                f"Under this review's thresholds, {classification} means the "
-                "modeled winning-chance loss crossed its configured band; here "
-                f"Stockfish shows {cp_loss} centipawns, or about "
-                f"{probability_loss} percentage points of win probability."
-            )
-        extra_refs.add("decision_context")
-
     f_pawn_pressure = next(
         (
             motif
@@ -846,7 +1045,11 @@ def _ground_explanation(
         )
         if piece.get("under_enemy_pressure")
     ]
-    if newly_defended:
+    if newly_defended and classification not in {
+        "inaccuracy",
+        "mistake",
+        "blunder",
+    }:
         moved_piece = move_effects.get("moved_piece") or {}
         defended_squares = {
             piece.get("square")
@@ -887,21 +1090,154 @@ def _ground_explanation(
             )
             extra_refs.add("decision_context")
 
+    moved_defender = tactical_reply.get("moved_piece_was_lost_defender")
+    reply_move = (tactical_reply.get("move") or {}).get("san")
+    if moved_defender:
+        target = tactical_reply.get("target_square")
+        defenders_before = tactical_reply.get(
+            "defenders_before_played_move"
+        ) or []
+        defenders_after = tactical_reply.get(
+            "defenders_after_played_move"
+        ) or []
+        played_move = (position.get("played_move") or {}).get("san")
+        mentions_defensive_mechanism = (
+            target
+            and target.lower() in explanation_lower
+            and "defend" in explanation_lower
+        )
+        mentions_reply = (
+            reply_move
+            and reply_move.lower() in explanation_lower
+        )
+        if not mentions_defensive_mechanism:
+            sole = (
+                "its only defender"
+                if len(defenders_before) == 1 and not defenders_after
+                else "a defender"
+            )
+            consequence = (
+                "checkmate"
+                if tactical_reply.get("gives_checkmate")
+                else "the tactical reply"
+            )
+            additions.append(
+                f"{played_move} moves the {moved_defender.get('piece')} away "
+                f"from {moved_defender.get('square')}, so {target} loses "
+                f"{sole}; {reply_move} is then {consequence}."
+            )
+            extra_refs.update({"decision_context", "stockfish.top_lines"})
+        elif reply_move and not mentions_reply:
+            additions.append(f"Black's concrete reply is {reply_move}.")
+            extra_refs.update({"decision_context", "stockfish.top_lines"})
+
+    new_pins = tactical_reply.get("new_absolute_pins") or []
+    if new_pins:
+        pin = new_pins[0]
+        attacked = pin.get("attacked_enemy_pieces_before_pin") or []
+        target = attacked[0] if attacked else {}
+        pressure = target.get("attacks_friendly_pieces") or []
+        mentions_pin = (
+            "pin" in explanation_lower
+            and pin.get("square", "").lower() in explanation_lower
+            and reply_move
+            and reply_move.lower() in explanation_lower
+        )
+        if not mentions_pin:
+            sentence = (
+                f"{reply_move} pins the {pin.get('piece')} on "
+                f"{pin.get('square')} to the king on {pin.get('king')}. "
+            )
+            if target:
+                sentence += (
+                    f"That {pin.get('piece')} had been attacking the "
+                    f"{target.get('piece')} on {target.get('square')}; once "
+                    "pinned, it cannot chase that piece"
+                )
+                if pressure:
+                    pressure_target = next(
+                        (
+                            piece
+                            for piece in pressure
+                            if piece.get("piece") in {"queen", "rook"}
+                        ),
+                        pressure[0],
+                    )
+                    sentence += (
+                        f", which keeps pressure on the "
+                        f"{pressure_target.get('piece')} on "
+                        f"{pressure_target.get('square')}"
+                    )
+                sentence += "."
+            additions.append(sentence)
+            extra_refs.add("decision_context")
+
+    engine_effects = decision.get("engine_choice_effects") or {}
+    engine_move = (engine_effects.get("move") or {}).get("san")
+    newly_defended_by_engine = [
+        piece
+        for piece in (
+            engine_effects.get("newly_defended_friendly_pieces") or []
+        )
+        if piece.get("under_enemy_pressure")
+        and piece.get("piece") in {"queen", "rook", "bishop", "knight"}
+    ]
+    should_explain_engine_choice = bool(
+        engine_move
+        and newly_defended_by_engine
+        and (
+            moved_defender
+            or new_pins
+            or classification in {"mistake", "blunder"}
+        )
+    )
+    if (
+        should_explain_engine_choice
+        and engine_move.lower() not in explanation_lower
+    ):
+        defended = newly_defended_by_engine[0]
+        defender = (defended.get("new_defenders") or [{}])[0]
+        clauses = []
+        moved_piece = engine_effects.get("moved_piece") or {}
+        if engine_effects.get("develops_minor_piece"):
+            clauses.append(
+                f"develops the {moved_piece.get('piece')} from "
+                f"{moved_piece.get('from')}"
+            )
+        clauses.append(
+            f"makes the {defender.get('piece')} on "
+            f"{defender.get('square')} a defender of the "
+            f"{defended.get('piece')} on {defended.get('square')}"
+        )
+        additions.append(
+            f"By contrast, {engine_move} " + " and ".join(clauses) + "."
+        )
+        extra_refs.add("decision_context")
+
     if decision.get("move_quality") == "allows_forced_mate":
         engine_choice = (decision.get("engine_first_choice") or {}).get("san")
         before = decision.get("assessment_before") or {}
+        combined_lower = (
+            explanation_lower + " " + " ".join(additions).lower()
+        )
         missing_contrast = (
-            "not a forced mate" not in explanation_lower
-            or (
-                engine_choice
-                and engine_choice.lower() not in explanation_lower
-            )
+            "not a forced mate" not in combined_lower
+            and "not previously a forced mate" not in combined_lower
+        ) or (
+            engine_choice
+            and engine_choice.lower() not in combined_lower
         )
         if missing_contrast:
+            engine_clause = (
+                f"; {engine_choice} was the engine's best defense"
+                if engine_choice
+                and engine_choice.lower() not in combined_lower
+                else ""
+            )
             additions.append(
                 f"Before this move the position was "
-                f"{_assessment_phrase(before)}, not a forced mate; "
-                f"{engine_choice} was the engine's best defense."
+                f"{_assessment_phrase(before)}, not a forced mate"
+                f"{engine_clause}."
             )
             extra_refs.add("decision_context")
 
@@ -917,7 +1253,14 @@ def _ground_explanation(
                 or "escape square" in explanation_lower
                 or "no escape" in explanation_lower
             )
-            if safe_count is not None and not mentions_confinement:
+            direct_mate_mechanism = bool(
+                moved_defender and tactical_reply.get("gives_checkmate")
+            )
+            if (
+                safe_count is not None
+                and not mentions_confinement
+                and not direct_mate_mechanism
+            ):
                 statuses = extra.get("adjacent_square_status") or {}
                 occupied = [
                     square
@@ -945,7 +1288,16 @@ def _ground_explanation(
                 extra_refs.add("motifs.forced_mate")
 
             mate_line = extra.get("mate_line_san") or []
-            if mate_line and mate_line[0].lower() not in explanation_lower:
+            already_added_reply = bool(
+                reply_move
+                and reply_move.lower()
+                in " ".join(additions).lower()
+            )
+            if (
+                mate_line
+                and mate_line[0].lower() not in explanation_lower
+                and not already_added_reply
+            ):
                 additions.append(
                     "The concrete mating line is " + " ".join(mate_line) + "."
                 )
@@ -1072,6 +1424,7 @@ def validate_explanations(
             )
         if not isinstance(lesson, str) or not lesson.strip():
             raise AIResponseError("A coaching lesson was missing.")
+        lesson = _ground_lesson(lesson, expected)
         if not isinstance(refs, list) or not refs:
             raise AIResponseError("A coaching explanation did not cite its evidence.")
 
@@ -1117,7 +1470,7 @@ def validate_explanations(
                 "move": expected_move,
                 "side": expected["side"],
                 "explanation": explanation,
-                "lesson": lesson.strip(),
+                "lesson": lesson,
                 "evidence_refs": normalized_refs,
             }
         )
