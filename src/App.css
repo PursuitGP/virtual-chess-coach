@@ -173,6 +173,22 @@ label {
   padding: clamp(1.2rem, 3vw, 2rem);
 }
 
+.intake-preference {
+  margin-bottom: 1rem;
+}
+
+.intake-preference label {
+  color: #c9d5cf;
+  font-weight: 700;
+}
+
+.intake-preference p {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
 .welcome-pgn-loader {
   display: grid;
   gap: 1rem;

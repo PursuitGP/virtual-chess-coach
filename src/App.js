@@ -533,6 +533,26 @@ export default function App() {
             </div>
 
             <div className="welcome-card">
+              <div className="intake-preference">
+                <label htmlFor="welcome-perspective">
+                  Coaching perspective
+                </label>
+                <select
+                  id="welcome-perspective"
+                  value={perspective}
+                  onChange={(event) => setPerspective(event.target.value)}
+                  disabled={analysisLoading}
+                >
+                  <option value="both">Both sides (recommended)</option>
+                  <option value="white">White</option>
+                  <option value="black">Black</option>
+                </select>
+                <p>
+                  Choose whose decisions the coach should emphasize throughout
+                  the review.
+                </p>
+              </div>
+
               <PGNLoader
                 onParsed={onPGNParsed}
                 disabled={analysisLoading}
@@ -830,7 +850,7 @@ export default function App() {
                 onChange={(event) => changePerspective(event.target.value)}
                 disabled={analysisLoading || coachingLoading}
               >
-                <option value="both">Both sides</option>
+                <option value="both">Both sides (recommended)</option>
                 <option value="white">White</option>
                 <option value="black">Black</option>
               </select>
