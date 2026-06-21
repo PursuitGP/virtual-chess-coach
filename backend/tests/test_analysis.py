@@ -159,7 +159,7 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(result["providers"]["stockfish"]["achieved_depth"]["minimum"], 14)
         self.assertEqual(
             result["providers"]["stockfish"]["total_time_budget_seconds"],
-            16.0,
+            14.0,
         )
         self.assertTrue(
             result["providers"]["stockfish"]["critical_multipv"]["enabled"]
@@ -325,6 +325,50 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(clearly_best["classification"], "clearly_best")
         self.assertFalse(clearly_best["only_move"])
 
+    def test_move_classification_uses_position_sensitive_winning_chances(self):
+        inaccuracy = analysis._move_classification(
+            {
+                "side": "black",
+                "stockfish": {"mover_loss_cp": 62},
+            },
+            {"type": "cp", "value": 13},
+            {"type": "cp", "value": 75},
+            played_matches_engine_first=False,
+        )
+        blunder = analysis._move_classification(
+            {
+                "side": "black",
+                "stockfish": {"mover_loss_cp": 200},
+            },
+            {"type": "cp", "value": 0},
+            {"type": "cp", "value": 200},
+            played_matches_engine_first=False,
+        )
+        self.assertEqual(inaccuracy["label"], "inaccuracy")
+        self.assertEqual(inaccuracy["centipawn_loss"], 62)
+        self.assertGreaterEqual(inaccuracy["winning_chance_loss"], 0.1)
+        self.assertEqual(blunder["label"], "blunder")
+        self.assertIn("winning-chance", blunder["method"])
+
+    def test_move_effects_recognize_ng5_defending_e4(self):
+        game = chess.pgn.read_game(
+            io.StringIO("1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 *")
+        )
+        records, _total = analysis._position_records(game, max_plies=7)
+        effects = analysis._move_piece_effects(records[-1])
+        self.assertEqual(
+            effects["moved_piece"],
+            {"piece": "knight", "from": "f3", "to": "g5"},
+        )
+        self.assertIn(
+            {
+                "piece": "pawn",
+                "square": "e4",
+                "under_enemy_pressure": True,
+            },
+            effects["newly_defended_friendly_pieces"],
+        )
+
     def test_critical_multipv_prioritizes_engine_first_tactical_responses(self):
         records = [
             {
@@ -367,7 +411,7 @@ class AnalysisTests(unittest.TestCase):
         provider = result["providers"]["stockfish"]
         self.assertAlmostEqual(
             provider["time_limit_seconds_per_position"],
-            16 / 21,
+            14 / 21,
         )
 
     def test_rating_filter_and_outcome_context_are_preserved(self):

@@ -52,6 +52,20 @@ const RANKS = ["1", "2", "3", "4", "5", "6", "7", "8"];
 const ALL_SQUARES = FILES.flatMap((file) =>
   RANKS.map((rank) => `${file}${rank}`)
 );
+const REVIEW_ARROW_BRUSHES = {
+  reviewBest: {
+    key: "review-best",
+    color: "#49d49d",
+    opacity: 0.9,
+    lineWidth: 11,
+  },
+  reviewPlayed: {
+    key: "review-played",
+    color: "#60a5fa",
+    opacity: 0.72,
+    lineWidth: 9,
+  },
+};
 
 function computeDests(chess) {
   const destinations = new Map();
@@ -101,6 +115,15 @@ function formatClassification(value) {
   return value
     .replaceAll("_", " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function moveArrow(uci, brush) {
+  if (typeof uci !== "string" || uci.length < 4) return null;
+  return {
+    orig: uci.slice(0, 2),
+    dest: uci.slice(2, 4),
+    brush,
+  };
 }
 
 function hasCompleteEvidence(analysis) {
@@ -168,6 +191,7 @@ export default function App() {
   const [coachingError, setCoachingError] = useState(null);
   const [health, setHealth] = useState(null);
   const [reviewElapsed, setReviewElapsed] = useState(0);
+  const [showMoveArrows, setShowMoveArrows] = useState(true);
 
   const reviewRef = useRef(null);
   const requestIdRef = useRef(0);
@@ -186,6 +210,16 @@ export default function App() {
     [coaching]
   );
   const currentExplanation = explanationMap.get(plyIndex) || null;
+  const reviewArrows = useMemo(() => {
+    if (!showMoveArrows || !currentRecord) return [];
+    const playedUci = currentRecord.played_move?.uci;
+    const bestUci =
+      currentRecord.decision_context?.engine_first_choice?.uci || null;
+    const played = moveArrow(playedUci, "reviewPlayed");
+    const best = moveArrow(bestUci, "reviewBest");
+    if (bestUci && bestUci === playedUci) return best ? [best] : [];
+    return [played, best].filter(Boolean);
+  }, [currentRecord, showMoveArrows]);
 
   const lastMove =
     plyIndex > 0 && pgnMoves[plyIndex - 1]
@@ -636,6 +670,18 @@ export default function App() {
               >
                 Flip board
               </button>
+              <button
+                type="button"
+                className={`arrow-toggle ${showMoveArrows ? "active" : ""}`}
+                aria-pressed={showMoveArrows}
+                onClick={() => setShowMoveArrows((value) => !value)}
+                title="Show the played move and Stockfish's first choice"
+              >
+                <span className="arrow-key played" aria-hidden="true" />
+                Played
+                <span className="arrow-key best" aria-hidden="true" />
+                Best
+              </button>
               <span className="toolbar-spacer" />
               <button
                 type="button"
@@ -678,14 +724,14 @@ export default function App() {
               <div className="engine-rail">
                 <div className="engine-readout">
                   <span>
+                    <small>Change</small>
+                    <strong>{evalChange}</strong>
+                  </span>
+                  <span>
                     <small>Eval</small>
                     <strong>
                       {evaluationLabel(displayedStockfish?.evaluation)}
                     </strong>
-                  </span>
-                  <span>
-                    <small>Change</small>
-                    <strong>{evalChange}</strong>
                   </span>
                   <span>
                     <small>{currentRecord ? "Best reply" : "Best move"}</small>
@@ -718,6 +764,14 @@ export default function App() {
                   color: pgnMoves.length ? undefined : "both",
                   dests,
                   showDests: true,
+                }}
+                drawable={{
+                  enabled: true,
+                  visible: true,
+                  defaultSnapToValidMove: true,
+                  eraseOnClick: false,
+                  autoShapes: reviewArrows,
+                  brushes: REVIEW_ARROW_BRUSHES,
                 }}
                 onMove={moveBoard}
               />
@@ -846,6 +900,22 @@ export default function App() {
                 <p className="coach-move">
                   Move {Math.ceil(currentExplanation.ply / 2)} ·{" "}
                   {currentExplanation.side} · {currentExplanation.move}
+                  {currentRecord?.decision_context?.move_classification
+                    ?.display && (
+                    <span
+                      className={`quality-badge ${
+                        currentRecord.decision_context.move_classification.label
+                      }`}
+                    >
+                      {
+                        currentRecord.decision_context.move_classification
+                          .display
+                      }
+                      {currentRecord.decision_context.move_classification
+                        .symbol &&
+                        ` ${currentRecord.decision_context.move_classification.symbol}`}
+                    </span>
+                  )}
                 </p>
                 <p>{currentExplanation.explanation}</p>
                 <div className="lesson">

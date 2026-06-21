@@ -175,14 +175,14 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             "STOCKFISH_CRITICAL_MULTIPV", 4
         ),
         STOCKFISH_CRITICAL_MAX_POSITIONS=_env_int(
-            "STOCKFISH_CRITICAL_MAX_POSITIONS", 5
+            "STOCKFISH_CRITICAL_MAX_POSITIONS", 4
         ),
         STOCKFISH_CRITICAL_MAX_SECONDS=_env_float(
-            "STOCKFISH_CRITICAL_MAX_SECONDS", 0.4
+            "STOCKFISH_CRITICAL_MAX_SECONDS", 0.3
         ),
         STOCKFISH_THREADS=_env_int("STOCKFISH_THREADS", 1),
         STOCKFISH_HASH_MB=_env_int("STOCKFISH_HASH_MB", 64),
-        STOCKFISH_TOTAL_SECONDS=_env_float("STOCKFISH_TOTAL_SECONDS", 16.0),
+        STOCKFISH_TOTAL_SECONDS=_env_float("STOCKFISH_TOTAL_SECONDS", 14.0),
         ANALYSIS_RATE_LIMIT=_env_int("ANALYSIS_RATE_LIMIT", 20),
         EXPLAIN_RATE_LIMIT=_env_int("EXPLAIN_RATE_LIMIT", 5),
         DISABLE_RATE_LIMITS=_env_bool("DISABLE_RATE_LIMITS", False),

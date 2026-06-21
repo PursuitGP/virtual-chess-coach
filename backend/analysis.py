@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
 import shutil
 import statistics
@@ -335,6 +336,173 @@ def _move_quality(
     return "sound"
 
 
+def _white_winning_chances(
+    evaluation: dict[str, Any] | None,
+) -> float | None:
+    if not isinstance(evaluation, dict):
+        return None
+    if evaluation.get("type") == "mate":
+        winner = evaluation.get("winner")
+        if winner == "white":
+            return 1.0
+        if winner == "black":
+            return -1.0
+        return None
+    value = evaluation.get("value")
+    if not isinstance(value, int):
+        return None
+    return max(
+        -1.0,
+        min(1.0, 2 / (1 + math.exp(-0.00368208 * value)) - 1),
+    )
+
+
+def _move_classification(
+    record: dict[str, Any],
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    *,
+    played_matches_engine_first: bool,
+) -> dict[str, Any]:
+    mover = record.get("side")
+    before_chances = _white_winning_chances(before)
+    after_chances = _white_winning_chances(after)
+    chance_loss = None
+    if before_chances is not None and after_chances is not None:
+        chance_loss = max(
+            0.0,
+            (
+                before_chances - after_chances
+                if mover == "white"
+                else after_chances - before_chances
+            ),
+        )
+
+    consequence = _move_quality(record, before, after)
+    if consequence in {
+        "allows_forced_mate",
+        "misses_forced_mate",
+        "fails_to_escape_forced_mate",
+    }:
+        label = "blunder"
+    elif chance_loss is None:
+        label = "unclear"
+    elif chance_loss >= 0.3:
+        label = "blunder"
+    elif chance_loss >= 0.2:
+        label = "mistake"
+    elif chance_loss >= 0.1:
+        label = "inaccuracy"
+    elif played_matches_engine_first:
+        label = "best"
+    elif chance_loss <= 0.02:
+        label = "excellent"
+    else:
+        label = "good"
+
+    definitions = {
+        "best": "Matches Stockfish's first choice in the position.",
+        "excellent": (
+            "Does not match the first engine choice but changes the modeled "
+            "winning chances by no more than 0.02."
+        ),
+        "good": (
+            "Keeps the modeled winning-chance loss below the 0.10 "
+            "inaccuracy threshold."
+        ),
+        "inaccuracy": (
+            "Reduces the mover's modeled winning chances by at least 0.10 "
+            "but less than 0.20."
+        ),
+        "mistake": (
+            "Reduces the mover's modeled winning chances by at least 0.20 "
+            "but less than 0.30."
+        ),
+        "blunder": (
+            "Reduces the mover's modeled winning chances by at least 0.30 "
+            "or newly allows a forced mate."
+        ),
+        "unclear": "The available engine scores cannot support a stable label.",
+    }
+    symbols = {
+        "best": "✓",
+        "excellent": "!",
+        "good": "",
+        "inaccuracy": "?!",
+        "mistake": "?",
+        "blunder": "??",
+        "unclear": "",
+    }
+    return {
+        "label": label,
+        "display": label.capitalize(),
+        "symbol": symbols[label],
+        "definition": definitions[label],
+        "method": "lichess-style-winning-chance-delta",
+        "winning_chance_loss": (
+            round(chance_loss, 3) if chance_loss is not None else None
+        ),
+        "estimated_win_probability_loss_pct": (
+            round(chance_loss * 50, 1) if chance_loss is not None else None
+        ),
+        "centipawn_loss": (record.get("stockfish") or {}).get("mover_loss_cp"),
+        "consequence": consequence,
+    }
+
+
+def _move_piece_effects(record: dict[str, Any]) -> dict[str, Any]:
+    try:
+        before = chess.Board(record["previous_fen"])
+        after = chess.Board(record["fen"])
+        move = chess.Move.from_uci(record["played_move"]["uci"])
+    except (KeyError, ValueError):
+        return {}
+
+    moved_piece = after.piece_at(move.to_square)
+    previous_piece = before.piece_at(move.from_square)
+    if moved_piece is None or previous_piece is None:
+        return {}
+
+    previous_attacks = set(before.attacks(move.from_square))
+    resulting_attacks = set(after.attacks(move.to_square))
+
+    def piece_details(square: chess.Square) -> dict[str, Any] | None:
+        piece = after.piece_at(square)
+        if piece is None:
+            return None
+        return {
+            "piece": chess.piece_name(piece.piece_type),
+            "square": chess.square_name(square),
+            "under_enemy_pressure": bool(
+                after.attackers(not piece.color, square)
+            ),
+        }
+
+    newly_defended = []
+    newly_attacked = []
+    for square in sorted(resulting_attacks - previous_attacks):
+        piece = after.piece_at(square)
+        if piece is None:
+            continue
+        details = piece_details(square)
+        if details is None:
+            continue
+        if piece.color == moved_piece.color:
+            newly_defended.append(details)
+        else:
+            newly_attacked.append(details)
+
+    return {
+        "moved_piece": {
+            "piece": chess.piece_name(moved_piece.piece_type),
+            "from": chess.square_name(move.from_square),
+            "to": chess.square_name(move.to_square),
+        },
+        "newly_defended_friendly_pieces": newly_defended[:6],
+        "newly_attacked_enemy_pieces": newly_attacked[:6],
+    }
+
+
 def _mover_engine_utility(
     evaluation: dict[str, Any] | None,
     mover: str,
@@ -481,6 +649,12 @@ def add_decision_context(
         evaluation_before = previous_stockfish.get("evaluation")
         evaluation_after = (record.get("stockfish") or {}).get("evaluation")
         move_choice = _move_choice_evidence(previous_stockfish, record["side"])
+        move_classification = _move_classification(
+            record,
+            evaluation_before,
+            evaluation_after,
+            played_matches_engine_first=played_matches,
+        )
 
         record["decision_context"] = {
             "evaluation_before": evaluation_before,
@@ -492,6 +666,8 @@ def add_decision_context(
                 evaluation_before,
                 evaluation_after,
             ),
+            "move_classification": move_classification,
+            "move_effects": _move_piece_effects(record),
             "engine_first_choice": {
                 "uci": engine_first_uci,
                 "san": engine_first_san,
@@ -1505,11 +1681,11 @@ def build_analysis(
     stockfish_max_seconds: float | None = 1.25,
     stockfish_multipv: int = 1,
     stockfish_critical_multipv: int = 4,
-    stockfish_critical_max_positions: int = 5,
-    stockfish_critical_max_seconds: float = 0.4,
+    stockfish_critical_max_positions: int = 4,
+    stockfish_critical_max_seconds: float = 0.3,
     stockfish_threads: int = 1,
     stockfish_hash_mb: int = 64,
-    stockfish_total_seconds: float | None = 16.0,
+    stockfish_total_seconds: float | None = 14.0,
     lichess_ratings: tuple[int, ...] | list[int] | None = None,
     lichess_speeds: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:

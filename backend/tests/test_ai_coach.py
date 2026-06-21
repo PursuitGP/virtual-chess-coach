@@ -307,6 +307,118 @@ class AICoachValidationTests(unittest.TestCase):
         self.assertTrue(any("engine defense Ke6" in point for point in points))
         self.assertFalse(any("played move Kg8 uniquely" in point for point in points))
 
+    def test_required_points_surface_f7_fork_threat_and_new_defense(self):
+        position = {
+            "played_move": {"san": "Ng5", "uci": "f3g5"},
+            "decision_context": {
+                "move_classification": {"label": "good"},
+                "move_effects": {
+                    "moved_piece": {
+                        "piece": "knight",
+                        "from": "f3",
+                        "to": "g5",
+                    },
+                    "newly_defended_friendly_pieces": [
+                        {
+                            "piece": "pawn",
+                            "square": "e4",
+                            "under_enemy_pressure": True,
+                        }
+                    ],
+                },
+            },
+            "stockfish": {"top_lines": []},
+            "motifs": [
+                {
+                    "id": "f2_f7_weakness",
+                    "extra": {
+                        "target_square": "f7",
+                        "threat_move_san": "Nxf7",
+                        "fork_targets": [
+                            {"piece": "queen", "square": "d8"},
+                            {"piece": "rook", "square": "h8"},
+                        ],
+                    },
+                }
+            ],
+        }
+        points = _required_coaching_points(position)
+        self.assertTrue(any("Nxf7" in point and "fork" in point for point in points))
+        self.assertTrue(any("e4" in point and "defends" in point for point in points))
+
+    def test_grounding_corrects_ng5_fork_and_e4_defense(self):
+        position = {
+            "played_move": {"san": "Ng5", "uci": "f3g5"},
+            "decision_context": {
+                "move_classification": {"label": "good"},
+                "move_effects": {
+                    "moved_piece": {
+                        "piece": "knight",
+                        "from": "f3",
+                        "to": "g5",
+                    },
+                    "newly_defended_friendly_pieces": [
+                        {
+                            "piece": "pawn",
+                            "square": "e4",
+                            "under_enemy_pressure": True,
+                        }
+                    ],
+                },
+            },
+            "motifs": [
+                {
+                    "id": "f2_f7_weakness",
+                    "extra": {
+                        "target_square": "f7",
+                        "threat_move_san": "Nxf7",
+                        "fork_targets": [
+                            {"piece": "queen", "square": "d8"},
+                            {"piece": "rook", "square": "h8"},
+                        ],
+                    },
+                }
+            ],
+        }
+        explanation, refs = _ground_explanation(
+            "White increases pressure on f7 with the knight and bishop. "
+            "The e4 pawn is potentially vulnerable after this aggressive move. "
+            "Black must respond accurately to the kingside pressure.",
+            position,
+        )
+        self.assertIn("Nxf7", explanation)
+        self.assertIn("fork", explanation)
+        self.assertIn("now defended", explanation)
+        self.assertIn("motifs.f2_f7_weakness", refs)
+
+    def test_grounding_enforces_quality_label_metric_and_eval_vocabulary(self):
+        position = {
+            "decision_context": {
+                "move_classification": {
+                    "label": "inaccuracy",
+                    "centipawn_loss": 62,
+                    "estimated_win_probability_loss_pct": 5.7,
+                    "consequence": "sound",
+                },
+                "assessment_after": {
+                    "classification": "slight_edge",
+                    "leader": "white",
+                },
+            },
+            "motifs": [],
+        }
+        explanation, refs = _ground_explanation(
+            "Black centralizes the knight with a natural recapture. This is a "
+            "mistake because White keeps the initiative. White now has a clear "
+            "advantage and can continue attacking.",
+            position,
+        )
+        self.assertIn("inaccuracy", explanation)
+        self.assertIn("62 centipawns", explanation)
+        self.assertNotIn("mistake", explanation)
+        self.assertNotIn("clear advantage", explanation)
+        self.assertIn("decision_context", refs)
+
     def test_grounding_adds_best_defense_and_material_context(self):
         position = {
             "ply": 13,

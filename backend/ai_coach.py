@@ -119,10 +119,70 @@ def verify_gemini_connection() -> dict[str, Any]:
         }
 
 
+def _stockfish_summary(stockfish: dict[str, Any] | None) -> dict[str, Any]:
+    stockfish = stockfish or {}
+    return {
+        "evaluation": stockfish.get("evaluation"),
+        "eval_delta_cp": stockfish.get("eval_delta_cp"),
+        "mover_loss_cp": stockfish.get("mover_loss_cp"),
+        "best_move": stockfish.get("best_move"),
+        "top_lines": [
+            {
+                "rank": line.get("rank"),
+                "evaluation": line.get("evaluation"),
+                "moves_san": (line.get("moves_san") or [])[:8],
+                "moves_uci": (line.get("moves_uci") or [])[:8],
+            }
+            for line in (stockfish.get("top_lines") or [])[:4]
+            if isinstance(line, dict)
+        ],
+    }
+
+
+def _motif_summary(motifs: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": motif.get("id"),
+            "name": motif.get("name"),
+            "side": motif.get("side"),
+            "severity": motif.get("severity"),
+            "confidence": motif.get("confidence"),
+            "extra": motif.get("extra") or {},
+        }
+        for motif in (motifs or [])
+        if isinstance(motif, dict)
+    ]
+
+
+def _lichess_summary(lichess: dict[str, Any] | None) -> dict[str, Any]:
+    lichess = lichess or {}
+
+    def database_summary(name: str) -> dict[str, Any]:
+        database = lichess.get(name) or {}
+        return {
+            "available": database.get("available"),
+            "position_games_before": database.get("position_games_before"),
+            "played_move": database.get("played_move"),
+            "continuations": (database.get("continuations") or [])[:3],
+        }
+
+    return {
+        "opening": lichess.get("opening"),
+        "theory_status": lichess.get("theory_status"),
+        "practical_signal": lichess.get("practical_signal"),
+        "practical_candidates": (lichess.get("practical_candidates") or [])[:3],
+        "masters": database_summary("masters"),
+        "players": database_summary("players"),
+    }
+
+
 def _context_summary(position: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(position, dict):
         return None
     stockfish = position.get("stockfish") or {}
+    decision = position.get("decision_context") or {}
+    engine_choice = decision.get("engine_first_choice") or {}
+    move_classification = decision.get("move_classification") or {}
     return {
         "ply": position.get("ply"),
         "side": position.get("side"),
@@ -132,10 +192,30 @@ def _context_summary(position: dict[str, Any] | None) -> dict[str, Any] | None:
             "evaluation": stockfish.get("evaluation"),
             "eval_delta_cp": stockfish.get("eval_delta_cp"),
             "mover_loss_cp": stockfish.get("mover_loss_cp"),
+            "first_line_san": (
+                ((stockfish.get("top_lines") or [{}])[0].get("moves_san") or [])
+                [:4]
+            ),
         },
-        "decision_context": position.get("decision_context"),
-        "motifs": position.get("motifs") or [],
-        "study": position.get("study"),
+        "decision_context": {
+            "assessment_after": decision.get("assessment_after"),
+            "move_quality": decision.get("move_quality"),
+            "move_classification": {
+                "label": move_classification.get("label"),
+                "centipawn_loss": move_classification.get("centipawn_loss"),
+                "estimated_win_probability_loss_pct": move_classification.get(
+                    "estimated_win_probability_loss_pct"
+                ),
+            },
+            "engine_first_choice": {
+                "san": engine_choice.get("san"),
+                "uci": engine_choice.get("uci"),
+            },
+            "played_matches_engine_first": decision.get(
+                "played_matches_engine_first"
+            ),
+        },
+        "motifs": _motif_summary(position.get("motifs"))[:5],
     }
 
 
@@ -150,10 +230,22 @@ def _required_coaching_points(position: dict[str, Any]) -> list[str]:
     best_reply = ((stockfish.get("top_lines") or [{}])[0].get("moves_san") or [])
     motifs = position.get("motifs") or []
     move_choice = decision.get("move_choice") or {}
+    move_classification = decision.get("move_classification") or {}
+    move_effects = decision.get("move_effects") or {}
 
     points.append(
         "Describe what the played move concretely changes on this board."
     )
+    classification = move_classification.get("label")
+    if classification in {"inaccuracy", "mistake", "blunder"}:
+        points.append(
+            f"Use the deterministic label {classification!r}, defined here as: "
+            f"{move_classification.get('definition')} The measured centipawn "
+            f"loss is {move_classification.get('centipawn_loss')} and the "
+            "estimated win-probability loss is "
+            f"{move_classification.get('estimated_win_probability_loss_pct')} "
+            "percentage points."
+        )
     if decision.get("move_quality") == "allows_forced_mate":
         points.extend(
             [
@@ -244,6 +336,39 @@ def _required_coaching_points(position: dict[str, Any]) -> list[str]:
                 points.append(
                     "Use the supplied mating line: " + " ".join(line) + "."
                 )
+        if motif.get("id") == "f2_f7_weakness":
+            extra = motif.get("extra") or {}
+            threat = extra.get("threat_move_san")
+            fork_targets = extra.get("fork_targets") or []
+            if threat and fork_targets:
+                targets = " and ".join(
+                    f"{target.get('piece')} on {target.get('square')}"
+                    for target in fork_targets
+                )
+                points.append(
+                    f"State that {threat} is threatened and would fork "
+                    f"{targets}; do not describe the pressure on "
+                    f"{extra.get('target_square')} only in general terms."
+                )
+
+    newly_defended = [
+        piece
+        for piece in (
+            move_effects.get("newly_defended_friendly_pieces") or []
+        )
+        if piece.get("under_enemy_pressure")
+    ]
+    if newly_defended:
+        moved_piece = move_effects.get("moved_piece") or {}
+        defended = ", ".join(
+            f"{piece.get('piece')} on {piece.get('square')}"
+            for piece in newly_defended[:2]
+        )
+        points.append(
+            f"Recognize that the {moved_piece.get('piece')} on "
+            f"{moved_piece.get('to')} now defends the friendly {defended}; "
+            "do not call that piece newly vulnerable."
+        )
 
     objective_leader = after.get("leader")
     material_leader = material.get("leader")
@@ -299,11 +424,11 @@ def _condense_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
                 "played_move": position.get("played_move"),
                 "previous_fen": position.get("previous_fen"),
                 "fen": position.get("fen"),
-                "stockfish": position.get("stockfish"),
+                "stockfish": _stockfish_summary(position.get("stockfish")),
                 "decision_context": position.get("decision_context"),
-                "lichess": position.get("lichess"),
+                "lichess": _lichess_summary(position.get("lichess")),
                 "study": position.get("study"),
-                "motifs": position.get("motifs"),
+                "motifs": _motif_summary(position.get("motifs")),
                 "motifs_available": position.get("motifs_available"),
                 "sequence_context": {
                     "previous_position": _context_summary(previous_position),
@@ -382,6 +507,10 @@ Rules:
    result of the move, and engine_first_choice is the best move from the
    position before the move. Never treat the best reply after a move as though
    it were the move the player should have chosen.
+   move_classification is the sole authority for labels such as inaccuracy,
+   mistake, and blunder. Never infer or upgrade one of those labels yourself.
+   move_effects identifies friendly pieces newly defended by the moved piece;
+   do not call one of those pieces newly loose or vulnerable.
 10. If decision_context.move_quality is "allows_forced_mate", explicitly say
     that the position was not previously lost by force, name the engine's best
     defense, and explain the new mating mechanism from the forced_mate motif
@@ -589,7 +718,23 @@ def _ground_explanation(
     ]
 
     additions = []
-    explanation_lower = " ".join(sentences).lower()
+    classification = (decision.get("move_classification") or {}).get("label")
+    if classification in {"inaccuracy", "mistake", "blunder"}:
+        for wrong_label in {"inaccuracy", "mistake", "blunder"} - {
+            classification
+        }:
+            sentences = [
+                re.sub(
+                    rf"\b{wrong_label}\b",
+                    classification,
+                    sentence,
+                    flags=re.I,
+                )
+                for sentence in sentences
+            ]
+        explanation_lower = " ".join(sentences).lower()
+    else:
+        explanation_lower = " ".join(sentences).lower()
     motifs = position.get("motifs") or []
     fork = next(
         (
@@ -637,6 +782,110 @@ def _ground_explanation(
                 extra_refs.add("decision_context")
             additions.append("; ".join(clauses) + ".")
         extra_refs.add("motifs.fork")
+
+    classification_data = decision.get("move_classification") or {}
+    if classification in {"inaccuracy", "mistake", "blunder"} and (
+        classification not in explanation_lower
+        or not re.search(
+            r"\b(?:centipawn|percentage point|winning chance|win probability|"
+            r"forced mate)\b",
+            explanation_lower,
+        )
+    ):
+        cp_loss = classification_data.get("centipawn_loss")
+        probability_loss = classification_data.get(
+            "estimated_win_probability_loss_pct"
+        )
+        if classification_data.get("consequence") == "allows_forced_mate":
+            additions.append(
+                "This review classifies the move as a blunder because it newly "
+                "allows a forced mate."
+            )
+        else:
+            additions.append(
+                f"Under this review's thresholds, {classification} means the "
+                "modeled winning-chance loss crossed its configured band; here "
+                f"Stockfish shows {cp_loss} centipawns, or about "
+                f"{probability_loss} percentage points of win probability."
+            )
+        extra_refs.add("decision_context")
+
+    f_pawn_pressure = next(
+        (
+            motif
+            for motif in motifs
+            if motif.get("id") == "f2_f7_weakness"
+            and (motif.get("extra") or {}).get("threat_move_san")
+            and (motif.get("extra") or {}).get("fork_targets")
+        ),
+        None,
+    )
+    if f_pawn_pressure:
+        extra = f_pawn_pressure.get("extra") or {}
+        threat = extra.get("threat_move_san")
+        targets = extra.get("fork_targets") or []
+        if (
+            threat.lower() not in explanation_lower
+            or "fork" not in explanation_lower
+        ):
+            target_text = " and ".join(
+                f"the {target.get('piece')} on {target.get('square')}"
+                for target in targets
+            )
+            additions.append(
+                f"The concrete threat is {threat}, which would fork "
+                f"{target_text}."
+            )
+            extra_refs.add("motifs.f2_f7_weakness")
+
+    move_effects = decision.get("move_effects") or {}
+    newly_defended = [
+        piece
+        for piece in (
+            move_effects.get("newly_defended_friendly_pieces") or []
+        )
+        if piece.get("under_enemy_pressure")
+    ]
+    if newly_defended:
+        moved_piece = move_effects.get("moved_piece") or {}
+        defended_squares = {
+            piece.get("square")
+            for piece in newly_defended
+            if piece.get("square")
+        }
+        vulnerable_pattern = "|".join(
+            re.escape(square) for square in sorted(defended_squares)
+        )
+        if vulnerable_pattern:
+            sentences = [
+                re.sub(
+                    rf"\b(?:the\s+)?(?:pawn\s+on\s+)?({vulnerable_pattern})"
+                    r"\s+(?:pawn\s+)?(?:is|becomes|remains|looks)?\s*"
+                    r"(?:potentially\s+)?vulnerable\b",
+                    rf"the \1 pawn is now defended by the "
+                    f"{moved_piece.get('piece')} on {moved_piece.get('to')}",
+                    sentence,
+                    flags=re.I,
+                )
+                for sentence in sentences
+            ]
+            explanation_lower = " ".join(sentences).lower()
+        missing_defense = [
+            piece
+            for piece in newly_defended
+            if piece.get("square")
+            and piece["square"].lower() not in explanation_lower
+        ]
+        if missing_defense:
+            defended = " and ".join(
+                f"the {piece.get('piece')} on {piece.get('square')}"
+                for piece in missing_defense[:2]
+            )
+            additions.append(
+                f"The move also makes the {moved_piece.get('piece')} on "
+                f"{moved_piece.get('to')} a defender of {defended}."
+            )
+            extra_refs.add("decision_context")
 
     if decision.get("move_quality") == "allows_forced_mate":
         engine_choice = (decision.get("engine_first_choice") or {}).get("san")
@@ -701,6 +950,25 @@ def _ground_explanation(
                     "The concrete mating line is " + " ".join(mate_line) + "."
                 )
                 extra_refs.update({"motifs.forced_mate", "stockfish.top_lines"})
+
+    after_assessment = decision.get("assessment_after") or {}
+    if after_assessment.get("classification") in {"roughly_equal", "slight_edge"}:
+        accurate_phrase = (
+            "a roughly equal position"
+            if after_assessment.get("classification") == "roughly_equal"
+            else "only a slight edge"
+        )
+        sentences = [
+            re.sub(
+                r"\b(?:a\s+)?(?:clear|decisive|overwhelming|significant|"
+                r"substantial)\s+advantage"
+                r"(?:\s+for\s+(?:white|black))?|\b(?:completely\s+)?winning\b",
+                accurate_phrase,
+                sentence,
+                flags=re.I,
+            )
+            for sentence in sentences
+        ]
 
     additions_words = _word_count(" ".join(additions))
     available_for_model = max(0, MAX_EXPLANATION_WORDS - additions_words)

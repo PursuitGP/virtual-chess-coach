@@ -94,12 +94,12 @@ class AppTests(unittest.TestCase):
         )
         self.assertEqual(
             analyze.call_args.kwargs["stockfish_critical_max_positions"],
-            5,
+            4,
         )
         self.assertEqual(analyze.call_args.kwargs["stockfish_hash_mb"], 64)
         self.assertEqual(
             analyze.call_args.kwargs["stockfish_total_seconds"],
-            16.0,
+            14.0,
         )
         explain.assert_not_called()
 

@@ -37,6 +37,8 @@ PGN
 - Recreate a game manually on a legal-move board and submit the generated PGN
 - Normalize common PGN formatting problems
 - Display game metadata and replay every legal move on a Chessground board
+- Toggle review arrows for the played move and Stockfish's first choice while
+  retaining Chessground's right-click drawing controls
 - Navigate with buttons or arrow, Home, and End keys
 - Inspect the current FEN and evaluation history
 
@@ -52,12 +54,21 @@ For each analyzed ply, the backend records:
 - Conservative signals such as `master-aligned-and-sound`, `common-rating-pool-mistake`, and `sound-novelty-candidate`
 - Curated opening names/ECO codes plus optional versioned study context matched by position, move, or opening family
 - Confidence-gated positional and tactical motifs
+- Deterministic move labels (`best`, `excellent`, `good`, `inaccuracy`,
+  `mistake`, `blunder`) with the measured engine loss included in the evidence
 
 Theory classification is calculated against the position before the move was played. “Novelty” is always labeled as a candidate: absence from the selected sample does not prove historical novelty. Lichess statistics are treated as descriptions of human behavior, never as objective evaluations.
 
+Move labels use the public Lichess-style approach: Stockfish centipawn scores
+are converted into modeled winning chances, then losses of `0.10`, `0.20`, and
+`0.30` mark an inaccuracy, mistake, and blunder respectively. Newly allowing a
+forced mate is always a blunder. Raw centipawn loss remains visible, but a
+fixed two-pawn swing is not automatically treated the same in an equal position
+and in a position that was already decisively won.
+
 Duplicate Lichess position queries are cached. The master and aggregate-player databases use two bounded request streams while each database remains chronological, and both run concurrently with one bounded Stockfish process. A per-database circuit breaker stops an outage or exhausted sample from turning into dozens of repeated calls. Stockfish retains the game history needed for repetition-aware analysis.
 
-The default opening window is 20 plies—ten White-and-Black move pairs—and therefore requires 21 primary engine searches including the initial position. Stockfish stops when it reaches either target depth 24 or the 1.25-second per-position ceiling. A 16-second primary-search budget automatically lowers the per-position ceiling for longer opening windows. Primary analysis uses MultiPV 1 for a strong best line. Up to four tactical or evaluation-critical decisions then receive a short MultiPV 4 comparison so the coach can distinguish a normal best move, a clearly superior move, and an engine-supported only move.
+The default opening window is 20 plies—ten White-and-Black move pairs—and therefore requires 21 primary engine searches including the initial position. Stockfish stops when it reaches either target depth 24 or the 1.25-second per-position ceiling. A 14-second primary-search budget automatically lowers the per-position ceiling for longer opening windows. Primary analysis uses MultiPV 1 for a strong best line. Up to four tactical or evaluation-critical decisions then receive a short MultiPV 4 comparison so the coach can distinguish a normal best move, a clearly superior move, and an engine-supported only move.
 
 The production image builds a pinned Stockfish 18 binary from the official source tag. Runtime defaults use one engine thread and 64 MB of hash so the service remains bounded on a small portfolio deployment.
 
@@ -283,10 +294,10 @@ Public defaults are intentionally conservative:
 - Maximum analysis: 20 plies (ten complete White-and-Black move pairs)
 - Stockfish 18 target depth: 24
 - Per-position engine ceiling: 1.25 seconds
-- Total Stockfish budget per review: 16 seconds
+- Total primary Stockfish budget per review: 14 seconds
 - Primary Stockfish MultiPV: 1
-- Selective critical-position comparison: MultiPV 4, at most five positions,
-  with a 0.4-second ceiling per comparison
+- Selective critical-position comparison: MultiPV 4, at most four positions,
+  with a 0.3-second ceiling per comparison
 - Stockfish resources: 1 thread and 64 MB hash
 - One Gunicorn worker with two request threads
 - Analysis limit: 20 requests per IP per hour
@@ -333,9 +344,10 @@ machine with Stockfish 18:
 | Stage | Wall time | Notes |
 | --- | ---: | --- |
 | Exact 19-ply mating-line evidence request | 11.4 s | Cold process; median engine depth 20.5 |
-| Validated 19-ply Gemini 3.1 Flash-Lite coaching | 13.5 s | 19 structured explanations |
+| Validated 19-ply Gemini 3.1 Flash-Lite coaching | 24.8 s | 19 detailed structured explanations |
+| Complete 19-ply opening review | 36.2 s | Evidence plus coaching |
 
-The UI targets roughly 25–35 seconds for the complete opening review. These are
+The UI targets roughly 30–45 seconds for the complete opening review. These are
 measurements, not cross-machine or provider guarantees: Lichess throttling,
 Gemini load, and deployment CPU can increase latency. The loading screen shows
 the active stage and elapsed time rather than pretending the request has
