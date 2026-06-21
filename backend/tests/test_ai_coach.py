@@ -13,7 +13,7 @@ from backend.ai_coach import (
     _ground_explanation,
     _required_coaching_points,
     _response_json_schema,
-    _sentence_count,
+    _word_count,
     build_explanation_cache_key,
     generate_explanations,
     validate_explanations,
@@ -158,7 +158,8 @@ class AICoachValidationTests(unittest.TestCase):
         self.assertIn('"required_coaching_points"', prompt)
         self.assertIn("Never say \"only move\"", prompt)
         self.assertIn('"study"', prompt)
-        self.assertIn("4-6 complete sentences", prompt)
+        self.assertIn("70-140 words", prompt)
+        self.assertIn("hard maximum of 180 words", prompt)
         self.assertNotIn('"lichess.fake.statistic"', prompt)
 
     def test_condensed_analysis_includes_adjacent_position_context(self):
@@ -188,27 +189,10 @@ class AICoachValidationTests(unittest.TestCase):
         payload["explanations"][0]["explanation"] = (
             "White occupies the center with e4. This is an active opening move."
         )
-        with self.assertRaisesRegex(AIResponseError, "too short|4 to 6"):
+        with self.assertRaisesRegex(AIResponseError, "too short"):
             validate_explanations(payload, sample_analysis())
 
-    def test_normalizes_three_and_seven_sentence_coaching(self):
-        three = valid_payload()
-        three["explanations"][0]["explanation"] = (
-            "White occupies the center with e4 and opens useful lines for the "
-            "queen and bishop. Black must now decide how to challenge that "
-            "central pawn while continuing development. White gains space "
-            "without committing the remaining pieces too early."
-        )
-        three_result = validate_explanations(three, sample_analysis())
-        self.assertEqual(
-            _sentence_count(three_result[0]["explanation"]),
-            4,
-        )
-        self.assertIn(
-            "supplied engine assessment",
-            three_result[0]["explanation"],
-        )
-
+    def test_preserves_natural_sentence_count_with_word_ceiling(self):
         seven = valid_payload()
         seven["explanations"][0]["explanation"] = (
             "White occupies the center with e4. The pawn opens the queen. "
@@ -217,13 +201,29 @@ class AICoachValidationTests(unittest.TestCase):
             "This seventh sentence should be removed."
         )
         seven_result = validate_explanations(seven, sample_analysis())
-        self.assertEqual(
-            _sentence_count(seven_result[0]["explanation"]),
-            6,
-        )
-        self.assertNotIn(
+        self.assertIn(
             "seventh sentence",
             seven_result[0]["explanation"],
+        )
+
+        oversized = valid_payload()
+        oversized["explanations"][0]["explanation"] = " ".join(
+            [
+                (
+                    f"Sentence {index} explains how White coordinates the "
+                    "central pawn, development, king safety, and practical "
+                    "choices without relying on generic engine praise."
+                )
+                for index in range(1, 18)
+            ]
+        )
+        oversized_result = validate_explanations(
+            oversized,
+            sample_analysis(),
+        )
+        self.assertLessEqual(
+            _word_count(oversized_result[0]["explanation"]),
+            180,
         )
 
     def test_response_schema_requires_one_structured_object_per_position(self):

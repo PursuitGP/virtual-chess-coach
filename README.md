@@ -77,7 +77,8 @@ The Fried Liver line `1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 d5 5. exd5 Nxd5 6. N
 - Uploading a game automatically runs evidence collection followed by AI coaching
 - Perspective can be White, Black, or both
 - Gemini must return one validated object for every analyzed ply
-- Explanations target four to six position-specific sentences and receive the
+- Explanations target roughly 70–140 position-specific words, with a 180-word
+  readability ceiling, and receive the
   previous position, the current evidence, and the opponent's next played move
 - Every explanation identifies the Stockfish, Lichess, study, or motif evidence it used
 - Misaligned moves, missing plies, malformed JSON, and invented evidence references are rejected

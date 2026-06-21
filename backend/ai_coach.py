@@ -10,9 +10,10 @@ import time
 from typing import Any
 
 
-PROMPT_VERSION = "2026-06-20.6"
+PROMPT_VERSION = "2026-06-20.7"
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 VALID_PERSPECTIVES = {"white", "black", "both"}
+MAX_EXPLANATION_WORDS = 180
 
 
 class AIConfigurationError(Exception):
@@ -350,18 +351,19 @@ Rules:
      "ply": 1,
      "move": "e4",
      "side": "white",
-     "explanation": "Position-specific coaching in 4-6 complete sentences.",
+     "explanation": "Position-specific coaching, usually 70-140 words.",
      "lesson": "One concise practical lesson.",
      "evidence_refs": ["stockfish.evaluation", "lichess.players.played_move"]
    }}]}}
 2. Return exactly one object for every supplied position, in the same order.
 3. Copy ply, move, and side exactly from the evidence package.
-4. Write exactly 4-6 complete sentences in explanation. Make them earn their
-   space: explain what the move changed, the concrete target or motif, the
-   opponent's practical problem, and why the engine/context supports the
-   conclusion. Do not pad the answer with generic opening principles.
-   Every item in required_coaching_points is mandatory. Combine related items
-   into one sentence when needed, but do not omit one.
+4. Aim for 70-140 words in explanation, with a hard maximum of 180 words.
+   Sentence count is flexible; use as many clear sentences as the position
+   genuinely needs. Explain what the move changed, the concrete target or
+   motif, the opponent's practical problem, and why the engine/context
+   supports the conclusion. Do not pad the answer with generic opening
+   principles. Every item in required_coaching_points is mandatory. Combine
+   related items when useful, but do not omit one.
 5. Never invent moves, variations, probabilities, opening names, evaluations,
    or tactical claims.
 6. A move or variation may be named only when it appears in stockfish.top_lines,
@@ -495,8 +497,18 @@ def _allowed_refs(
     return refs
 
 
-def _sentence_count(text: str) -> int:
-    return len(_split_sentences(text))
+def _word_count(text: str) -> int:
+    return len(text.split())
+
+
+def _trim_to_word_limit(text: str, max_words: int) -> str:
+    if max_words <= 0:
+        return ""
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    trimmed = " ".join(words[:max_words]).rstrip(" ,;:-")
+    return trimmed if trimmed.endswith((".", "!", "?")) else f"{trimmed}."
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -690,8 +702,16 @@ def _ground_explanation(
                 )
                 extra_refs.update({"motifs.forced_mate", "stockfish.top_lines"})
 
-    while additions and len(sentences) + len(additions) > 6:
+    additions_words = _word_count(" ".join(additions))
+    available_for_model = max(0, MAX_EXPLANATION_WORDS - additions_words)
+    while len(sentences) > 1 and _word_count(" ".join(sentences)) > available_for_model:
         sentences.pop()
+    if sentences and _word_count(" ".join(sentences)) > available_for_model:
+        trimmed = _trim_to_word_limit(
+            " ".join(sentences),
+            available_for_model,
+        )
+        sentences = [trimmed] if trimmed else []
     sentences.extend(additions)
     return " ".join(sentences), extra_refs
 
@@ -777,25 +797,10 @@ def validate_explanations(
             explanation.strip(),
             expected,
         )
-        sentences = _split_sentences(explanation)
-        if len(sentences) > 6:
-            sentences = sentences[:6]
-            explanation = " ".join(sentences)
-        elif len(sentences) == 3:
-            decision = expected.get("decision_context") or {}
-            assessment = decision.get("assessment_after") or {}
-            sentences.append(
-                "After the move, the supplied engine assessment is "
-                f"{_assessment_phrase(assessment)}."
-            )
-            explanation = " ".join(sentences)
-            grounded_refs.add("decision_context")
-
-        sentence_count = len(sentences)
-        if sentence_count < 4 or sentence_count > 6:
+        if _word_count(explanation) > MAX_EXPLANATION_WORDS:
             raise AIResponseError(
-                "A coaching explanation must contain 4 to 6 complete "
-                f"sentences at ply {expected.get('ply')}."
+                "A coaching explanation exceeded the readability limit at "
+                f"ply {expected.get('ply')}."
             )
         if not isinstance(lesson, str) or not lesson.strip():
             raise AIResponseError("A coaching lesson was missing.")
