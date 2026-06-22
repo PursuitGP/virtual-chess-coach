@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 
-PROMPT_VERSION = "2026-06-21.8"
+PROMPT_VERSION = "2026-06-21.9"
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 VALID_PERSPECTIVES = {"white", "black", "both"}
 MAX_EXPLANATION_WORDS = 150
@@ -457,6 +457,80 @@ def _required_coaching_points(position: dict[str, Any]) -> list[str]:
     return points[:8]
 
 
+def _coaching_focus(position: dict[str, Any]) -> list[dict[str, Any]]:
+    """Select structured, time-scoped facts without writing coaching prose."""
+    decision = position.get("decision_context") or {}
+    reply_tactics = decision.get("reply_tactics") or {}
+    reply = (
+        reply_tactics.get("best_reply")
+        if reply_tactics.get("actual_matches_best")
+        else reply_tactics.get("actual_reply")
+    ) or reply_tactics.get("best_reply") or {}
+    focus: list[dict[str, Any]] = []
+
+    moved_defender = reply.get("moved_piece_was_lost_defender")
+    if moved_defender:
+        focus.append(
+            {
+                "type": "defensive_duty_lost_after_played_move",
+                "timing": "position_after_played_move",
+                "played_move": position.get("played_move"),
+                "defender_before_move": moved_defender,
+                "defended_square": reply.get("target_square"),
+                "opponent_reply": reply.get("move"),
+                "reply_gives_check": reply.get("gives_check"),
+                "reply_gives_checkmate": reply.get("gives_checkmate"),
+            }
+        )
+
+    for pin in (reply.get("new_absolute_pins") or [])[:2]:
+        focus.append(
+            {
+                "type": "absolute_pin_created_by_opponent_reply",
+                "timing": "position_after_opponent_reply",
+                "played_move": position.get("played_move"),
+                "opponent_reply": reply.get("move"),
+                "pinned_piece": {
+                    "piece": pin.get("piece"),
+                    "square": pin.get("square"),
+                },
+                "king_square": pin.get("king"),
+                "targets_attacked_before_pin": pin.get(
+                    "attacked_enemy_pieces_before_pin"
+                )
+                or [],
+            }
+        )
+
+    engine_effects = decision.get("engine_choice_effects") or {}
+    useful_defenses = [
+        piece
+        for piece in (
+            engine_effects.get("newly_defended_friendly_pieces") or []
+        )
+        if piece.get("under_enemy_pressure")
+    ]
+    if engine_effects.get("move") and (
+        useful_defenses or engine_effects.get("develops_minor_piece")
+    ):
+        focus.append(
+            {
+                "type": "engine_alternative_board_effects",
+                "timing": "alternative_from_position_before_played_move",
+                "engine_move": engine_effects.get("move"),
+                "moved_piece": engine_effects.get("moved_piece"),
+                "develops_minor_piece": engine_effects.get(
+                    "develops_minor_piece"
+                ),
+                "newly_defended_friendly_pieces": useful_defenses[:3],
+                "newly_attacked_enemy_pieces": (
+                    engine_effects.get("newly_attacked_enemy_pieces") or []
+                )[:3],
+            }
+        )
+    return focus
+
+
 def _condense_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
     source_positions = analysis.get("positions", [])
     positions = []
@@ -496,7 +570,7 @@ def _condense_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
                     "previous_position": _context_summary(previous_position),
                     "next_position": _context_summary(next_position),
                 },
-                "required_coaching_points": _required_coaching_points(position),
+                "coaching_focus": _coaching_focus(position),
                 "available_evidence_refs": sorted(
                     _allowed_refs(
                         position,
@@ -515,6 +589,97 @@ def _condense_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _coaching_focus_briefing(positions: list[dict[str, Any]]) -> str:
+    """Render coaching_focus items as a human-readable tactical briefing.
+
+    The briefing surfaces the structured facts that most need to appear in
+    the coaching prose so the model sees them as plain English before reading
+    the JSON evidence package.
+    """
+    lines: list[str] = []
+    for pos in positions:
+        focus = pos.get("coaching_focus") or []
+        if not focus:
+            continue
+        ply = pos.get("ply")
+        played_san = (pos.get("played_move") or {}).get("san", "")
+        side = pos.get("side", "")
+        for item in focus:
+            item_type = item.get("type")
+            if item_type == "absolute_pin_created_by_opponent_reply":
+                reply_san = (item.get("opponent_reply") or {}).get("san", "")
+                pinned = item.get("pinned_piece") or {}
+                pinned_piece = pinned.get("piece", "")
+                pinned_sq = pinned.get("square", "")
+                king_sq = item.get("king_square", "")
+                targets = item.get("targets_attacked_before_pin") or []
+                target_clause = ""
+                if targets:
+                    t = targets[0]
+                    pressure = t.get("attacks_friendly_pieces") or []
+                    target_clause = (
+                        f" Before the pin the {pinned_piece} on {pinned_sq} was"
+                        f" attacking the {t.get('piece')} on {t.get('square')}"
+                        f" and can no longer do so."
+                    )
+                    if pressure:
+                        p = pressure[0]
+                        target_clause += (
+                            f" That keeps pressure on the {p.get('piece')}"
+                            f" on {p.get('square')}."
+                        )
+                lines.append(
+                    f"Ply {ply} ({played_san}, {side}): {reply_san} creates an"
+                    f" absolute pin on the {pinned_piece} on {pinned_sq} to the"
+                    f" king on {king_sq} — this pin exists only AFTER {reply_san},"
+                    f" not after {played_san}.{target_clause}"
+                )
+            elif item_type == "defensive_duty_lost_after_played_move":
+                reply_san = (item.get("opponent_reply") or {}).get("san", "")
+                defended_sq = item.get("defended_square", "")
+                checkmate = item.get("reply_gives_checkmate")
+                consequence = "delivering checkmate" if checkmate else reply_san
+                lines.append(
+                    f"Ply {ply} ({played_san}, {side}): {played_san} removes the"
+                    f" defender of {defended_sq}, enabling {consequence}."
+                )
+            elif item_type == "engine_alternative_board_effects":
+                engine_move = (item.get("engine_move") or {}).get("san", "")
+                defended = item.get("newly_defended_friendly_pieces") or []
+                develops = item.get("develops_minor_piece")
+                if not engine_move:
+                    continue
+                effects: list[str] = []
+                if develops:
+                    moved_piece = item.get("moved_piece") or {}
+                    effects.append(
+                        f"develops the {moved_piece.get('piece')} from"
+                        f" {moved_piece.get('from')}"
+                    )
+                for d in defended[:2]:
+                    new_def = (d.get("new_defenders") or [{}])[0]
+                    effects.append(
+                        f"makes the {new_def.get('piece')} on"
+                        f" {new_def.get('square')} a new defender of the"
+                        f" {d.get('piece')} on {d.get('square')}"
+                    )
+                if effects:
+                    lines.append(
+                        f"Ply {ply} ({played_san}, {side}): Alternative"
+                        f" {engine_move} "
+                        + " and ".join(effects)
+                        + "."
+                    )
+    if not lines:
+        return ""
+    header = (
+        "TACTICAL BRIEFING — the following facts are grounded in the evidence"
+        " and must appear when they are relevant to the position being coached."
+        " Use the exact pieces, squares, and timing stated here:"
+    )
+    return header + "\n" + "\n".join(f"  • {line}" for line in lines)
+
+
 def _build_prompt(analysis: dict[str, Any], perspective: str) -> str:
     evidence = _condense_analysis(analysis)
     perspective_instruction = {
@@ -522,6 +687,7 @@ def _build_prompt(analysis: dict[str, Any], perspective: str) -> str:
         "black": "Coach from Black's perspective at every ply.",
         "both": "Explain what each played move means for both players, emphasizing the side that just moved.",
     }[perspective]
+    briefing = _coaching_focus_briefing(evidence.get("positions") or [])
 
     return f"""
 You are the synthesis layer in an evidence-grounded chess coaching system.
@@ -549,8 +715,9 @@ Rules:
    genuinely needs. Explain what the move changed, the concrete target or
    motif, the opponent's practical problem, and why the engine/context
    supports the conclusion. Do not pad the answer with generic opening
-   principles. Every item in required_coaching_points is mandatory. Combine
-   related items when useful, but do not omit one.
+   principles. coaching_focus contains selected structured facts that are
+   especially useful for explaining the position. Use the relevant facts
+   naturally; do not turn every field into a sentence.
    Lead with the causal mechanism. Mention the move label or evaluation change
    at most once, then make every remaining sentence add a new piece, square,
    threat, defensive duty, or useful alternative. Never paraphrase "the move
@@ -581,6 +748,11 @@ Rules:
    including abandoned defensive squares and newly created absolute pins.
    engine_choice_effects explains useful board changes made by the engine's
    preferred alternative.
+   Timing is strict: the played move produces position_after_played_move. An
+   opponent reply then produces position_after_opponent_reply. A motif marked
+   position_after_opponent_reply does not exist immediately after the played
+   move. Say that the played move "allows" or "permits" the reply; attribute
+   the resulting pin, fork, check, or mate to the reply itself.
 10. If decision_context.move_quality is "allows_forced_mate", explicitly say
     that the position was not previously lost by force, name the engine's best
     defense, and explain the new mating mechanism from the forced_mate motif
@@ -641,7 +813,7 @@ Rules:
 29. The practical lesson must be a reusable decision check tied to this exact
     mechanism. Avoid empty advice such as "watch for tactics," "be careful,"
     "winning material is good," or "develop your pieces."
-
+{(chr(10) + briefing + chr(10)) if briefing else ""}
 Perspective: {perspective}
 Prompt version: {PROMPT_VERSION}
 Evidence package:
@@ -1380,6 +1552,140 @@ def _response_json_schema(analysis: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_explanation_content(
+    explanation: str,
+    lesson: str,
+    position: dict[str, Any],
+) -> None:
+    lower = explanation.lower()
+    decision = position.get("decision_context") or {}
+
+    if re.search(
+        r"\b(?:centipawn|modeled winning-chance|win probability|"
+        r"percentage points? of (?:win|winning))\b",
+        lower,
+    ):
+        raise AIResponseError(
+            "Coaching included engine-classification math instead of a board explanation."
+        )
+
+    reply = _select_tactical_reply(decision)
+    reply_san = str((reply.get("move") or {}).get("san") or "")
+    reply_lower = reply_san.lower()
+    moved_defender = reply.get("moved_piece_was_lost_defender")
+    if moved_defender:
+        target = str(reply.get("target_square") or "")
+        discusses_defensive_duty = bool(
+            target
+            and target.lower() in lower
+            and re.search(
+                r"\b(?:defend|guard|protect|abandon)\w*\b",
+                lower,
+            )
+        )
+        if (
+            discusses_defensive_duty
+            and reply_lower
+            and reply_lower not in lower
+        ):
+            raise AIResponseError(
+                "Coaching described a lost defensive duty without connecting "
+                "the resulting opponent reply."
+            )
+
+    for pin in (reply.get("new_absolute_pins") or [])[:2]:
+        pinned_square = str(pin.get("square") or "")
+        pin_pattern = r"\bpin(?:s|ned|ning)?\b"
+        for sentence in _split_sentences(explanation):
+            sentence_lower = sentence.lower()
+            if (
+                re.search(pin_pattern, sentence_lower)
+                and pinned_square.lower() in sentence_lower
+                and (
+                    not reply_lower
+                    or reply_lower not in sentence_lower
+                )
+            ):
+                raise AIResponseError(
+                    f"At ply {position.get('ply')}, the pin on "
+                    f"{pinned_square} exists only after {reply_san}. The played "
+                    f"move {(position.get('played_move') or {}).get('san')} "
+                    f"allows {reply_san}; it does not itself create the pin."
+                )
+
+    focus_types = {
+        item.get("type")
+        for item in _coaching_focus(position)
+        if isinstance(item, dict)
+    }
+    tactical_focus = [
+        item
+        for item in _coaching_focus(position)
+        if item.get("type")
+        in {
+            "defensive_duty_lost_after_played_move",
+            "absolute_pin_created_by_opponent_reply",
+        }
+    ]
+    if tactical_focus:
+        focus_covered = False
+        for item in tactical_focus:
+            if item.get("type") == "defensive_duty_lost_after_played_move":
+                target = str(item.get("defended_square") or "").lower()
+                reply_move = str(
+                    (item.get("opponent_reply") or {}).get("san") or ""
+                ).lower()
+                focus_covered = bool(
+                    target
+                    and target in lower
+                    and reply_move
+                    and reply_move in lower
+                    and re.search(
+                        r"\b(?:defend|guard|protect|abandon)\w*\b",
+                        lower,
+                    )
+                )
+            elif item.get("type") == "absolute_pin_created_by_opponent_reply":
+                pinned_square = str(
+                    (item.get("pinned_piece") or {}).get("square") or ""
+                ).lower()
+                reply_move = str(
+                    (item.get("opponent_reply") or {}).get("san") or ""
+                ).lower()
+                focus_covered = bool(
+                    pinned_square
+                    and pinned_square in lower
+                    and reply_move
+                    and reply_move in lower
+                    and re.search(r"\bpin(?:s|ned|ning)?\b", lower)
+                )
+            if focus_covered:
+                break
+        if not focus_covered:
+            raise AIResponseError(
+                f"At ply {position.get('ply')}, coaching stayed generic despite "
+                "structured tactical focus. Use at least one supplied focus fact "
+                "with its pieces, squares, and timing."
+            )
+
+    if focus_types.intersection(
+        {
+            "defensive_duty_lost_after_played_move",
+            "absolute_pin_created_by_opponent_reply",
+        }
+    ) and re.search(
+        r"\b(?:always be aware of tactics?|watch for tactics?|be careful|"
+        r"double-check your moves? for tactical|winning material is good|"
+        r"develop your pieces)\b",
+        lesson,
+        re.I,
+    ):
+        raise AIResponseError(
+            "The practical lesson was generic despite concrete tactical evidence "
+            f"at ply {position.get('ply')}."
+        )
+
+
 def validate_explanations(
     payload: Any,
     analysis: dict[str, Any],
@@ -1413,10 +1719,7 @@ def validate_explanations(
         refs = item.get("evidence_refs")
         if not isinstance(explanation, str) or len(explanation.strip()) < 120:
             raise AIResponseError("A coaching explanation was missing or too short.")
-        explanation, grounded_refs = _ground_explanation(
-            explanation.strip(),
-            expected,
-        )
+        explanation = explanation.strip()
         if _word_count(explanation) > MAX_EXPLANATION_WORDS:
             raise AIResponseError(
                 "A coaching explanation exceeded the readability limit at "
@@ -1424,7 +1727,8 @@ def validate_explanations(
             )
         if not isinstance(lesson, str) or not lesson.strip():
             raise AIResponseError("A coaching lesson was missing.")
-        lesson = _ground_lesson(lesson, expected)
+        lesson = lesson.strip()
+        _validate_explanation_content(explanation, lesson, expected)
         if not isinstance(refs, list) or not refs:
             raise AIResponseError("A coaching explanation did not cite its evidence.")
 
@@ -1453,9 +1757,6 @@ def validate_explanations(
                 and ref in allowed
                 and ref not in normalized_refs
             ):
-                normalized_refs.append(ref)
-        for ref in sorted(grounded_refs):
-            if ref in allowed and ref not in normalized_refs:
                 normalized_refs.append(ref)
         if not normalized_refs:
             normalized_refs.append(
@@ -1516,58 +1817,99 @@ def generate_explanations(
     from google.genai import types as genai_types
 
     client = genai.Client(api_key=key)
-    response = None
-    last_error: Exception | None = None
-    for attempt in range(_provider_attempts()):
+    base_prompt = _build_prompt(analysis, perspective)
+    last_provider_error: Exception | None = None
+    last_response_error: AIResponseError | None = None
+    attempts = _provider_attempts()
+    for attempt in range(attempts):
+        prompt = base_prompt
+        if last_response_error is not None:
+            error_text = str(last_response_error)
+            if "coaching stayed generic" in error_text:
+                supplement = (
+                    "For every position that has a TACTICAL BRIEFING entry above,"
+                    " you must include the specific pieces, squares, reply move,"
+                    " and timing stated there. Do not summarise them in general"
+                    " terms — name the exact squares and moves."
+                )
+            elif "exists only after" in error_text:
+                supplement = (
+                    "Timing is strict: the played move produces"
+                    " position_after_played_move; an opponent reply then produces"
+                    " position_after_opponent_reply. A pin, fork, or mate that"
+                    " appears only in position_after_opponent_reply must be"
+                    " attributed to that reply, not to the played move. Say the"
+                    " played move 'allows' or 'permits' the reply; attribute the"
+                    " resulting tactic to the reply itself."
+                )
+            else:
+                supplement = "Correct the factual or chronological problem."
+            prompt += (
+                "\n\nThe previous response failed validation for this reason: "
+                f"{error_text} Regenerate the entire JSON response. "
+                f"{supplement} Do not mention this validation message."
+            )
         try:
             response = client.models.generate_content(
                 model=_model_name(),
-                contents=_build_prompt(analysis, perspective),
+                contents=prompt,
                 config=genai_types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_json_schema=_response_json_schema(analysis),
                     max_output_tokens=8192,
                     temperature=0.2,
                     thinking_config=genai_types.ThinkingConfig(
-                        thinking_level=genai_types.ThinkingLevel.MINIMAL,
+                        thinking_level=genai_types.ThinkingLevel.LOW,
                     ),
                 ),
             )
-            break
         except AIConfigurationError:
             raise
         except Exception as exc:
-            last_error = exc
+            last_provider_error = exc
             if (
-                attempt + 1 >= _provider_attempts()
+                attempt + 1 >= attempts
                 or not _is_transient_provider_error(exc)
             ):
                 break
             time.sleep(1.0 * (attempt + 1))
+            continue
 
-    if response is None:
-        assert last_error is not None
+        try:
+            text = _extract_json_text(response)
+            payload = json.loads(text)
+            explanations = validate_explanations(payload, analysis)
+        except json.JSONDecodeError as exc:
+            last_response_error = AIResponseError(
+                "Gemini returned malformed coaching data."
+            )
+            if attempt + 1 >= attempts:
+                raise AIResponseError(
+                    "Gemini returned malformed coaching data. Please retry."
+                ) from exc
+            continue
+        except AIResponseError as exc:
+            last_response_error = exc
+            if attempt + 1 >= attempts:
+                raise
+            continue
+
+        return {
+            "analysis_id": analysis.get("analysis_id"),
+            "perspective": perspective,
+            "model": _model_name(),
+            "prompt_version": PROMPT_VERSION,
+            "explanations": explanations,
+        }
+
+    if last_provider_error is not None:
         raise AIProviderError(
-            f"{_safe_provider_error(last_error)} "
+            f"{_safe_provider_error(last_provider_error)} "
             "Your analysis is preserved; please retry."
-        ) from last_error
-
-    text = _extract_json_text(response)
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise AIResponseError(
-            "Gemini returned malformed coaching data. Please retry."
-        ) from exc
-
-    explanations = validate_explanations(payload, analysis)
-    return {
-        "analysis_id": analysis.get("analysis_id"),
-        "perspective": perspective,
-        "model": _model_name(),
-        "prompt_version": PROMPT_VERSION,
-        "explanations": explanations,
-    }
+        ) from last_provider_error
+    if last_response_error is not None:
+        raise last_response_error
+    raise AIProviderError("Gemini could not generate coaching.")
 
 
 def _safe_provider_error(exc: Exception) -> str:

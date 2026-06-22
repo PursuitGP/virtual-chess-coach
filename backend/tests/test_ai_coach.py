@@ -9,6 +9,7 @@ from backend.ai_coach import (
     AIConfigurationError,
     AIResponseError,
     _build_prompt,
+    _coaching_focus_briefing,
     _condense_analysis,
     _ground_explanation,
     _ground_lesson,
@@ -110,6 +111,78 @@ def valid_payload():
     }
 
 
+def englund_pin_analysis():
+    return {
+        "analysis_id": "englund-pin",
+        "positions": [
+            {
+                "ply": 11,
+                "side": "white",
+                "played_move": {"san": "Bc3", "uci": "d2c3"},
+                "stockfish": {
+                    "evaluation": {"type": "cp", "value": -520},
+                    "top_lines": [
+                        {
+                            "moves_san": ["Bb4", "Bd2", "Qxa1"],
+                            "moves_uci": ["f8b4", "c3d2", "b2a1"],
+                        }
+                    ],
+                },
+                "decision_context": {
+                    "move_classification": {"label": "blunder"},
+                    "engine_first_choice": {"san": "Nc3", "uci": "b1c3"},
+                    "reply_tactics": {
+                        "actual_matches_best": True,
+                        "best_reply": {
+                            "move": {"san": "Bb4", "uci": "f8b4"},
+                            "new_absolute_pins": [
+                                {
+                                    "piece": "bishop",
+                                    "square": "c3",
+                                    "king": "e1",
+                                    "attacked_enemy_pieces_before_pin": [
+                                        {
+                                            "piece": "queen",
+                                            "square": "b2",
+                                            "attacks_friendly_pieces": [
+                                                {
+                                                    "piece": "rook",
+                                                    "square": "a1",
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    },
+                    "engine_choice_effects": {
+                        "move": {"san": "Nc3", "uci": "b1c3"},
+                        "moved_piece": {
+                            "piece": "knight",
+                            "from": "b1",
+                            "to": "c3",
+                        },
+                        "develops_minor_piece": True,
+                        "newly_defended_friendly_pieces": [
+                            {
+                                "piece": "rook",
+                                "square": "a1",
+                                "under_enemy_pressure": True,
+                                "new_defenders": [
+                                    {"piece": "queen", "square": "d1"}
+                                ],
+                            }
+                        ],
+                    },
+                },
+                "lichess": {},
+                "motifs": [],
+            }
+        ],
+    }
+
+
 class AICoachValidationTests(unittest.TestCase):
     def test_accepts_aligned_evidence_grounded_output(self):
         result = validate_explanations(valid_payload(), sample_analysis())
@@ -156,7 +229,8 @@ class AICoachValidationTests(unittest.TestCase):
         self.assertIn('"motifs.take_center"', prompt)
         self.assertIn('"sequence_context"', prompt)
         self.assertIn('"decision_context"', prompt)
-        self.assertIn('"required_coaching_points"', prompt)
+        self.assertIn('"coaching_focus"', prompt)
+        self.assertIn("position_after_opponent_reply", prompt)
         self.assertIn("Never say \"only move\"", prompt)
         self.assertIn('"study"', prompt)
         self.assertIn("45-110 words", prompt)
@@ -186,6 +260,18 @@ class AICoachValidationTests(unittest.TestCase):
             second_condensed["available_evidence_refs"],
         )
 
+    def test_condensed_analysis_scopes_reply_created_pin_after_reply(self):
+        condensed = _condense_analysis(englund_pin_analysis())
+        focus = condensed["positions"][0]["coaching_focus"]
+        pin = next(
+            item
+            for item in focus
+            if item["type"] == "absolute_pin_created_by_opponent_reply"
+        )
+        self.assertEqual(pin["timing"], "position_after_opponent_reply")
+        self.assertEqual(pin["opponent_reply"]["san"], "Bb4")
+        self.assertEqual(pin["pinned_piece"]["square"], "c3")
+
     def test_rejects_surface_level_two_sentence_coaching(self):
         payload = valid_payload()
         payload["explanations"][0]["explanation"] = (
@@ -193,6 +279,88 @@ class AICoachValidationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AIResponseError, "too short"):
             validate_explanations(payload, sample_analysis())
+
+    def test_rejects_pin_attributed_to_played_move_before_reply(self):
+        payload = {
+            "explanations": [
+                {
+                    "ply": 11,
+                    "move": "Bc3",
+                    "side": "white",
+                    "explanation": (
+                        "By moving the bishop to c3, White pins the bishop to "
+                        "the king on e1, creating a tactical weakness. Black "
+                        "then plays Bb4 and keeps pressure on the rook at a1. "
+                        "The better move was Nc3, which develops the knight and "
+                        "helps White coordinate the queenside."
+                    ),
+                    "lesson": (
+                        "When attacking a queen, check whether the opponent can "
+                        "create a pin that neutralizes your attacking piece."
+                    ),
+                    "evidence_refs": [
+                        "decision_context",
+                        "stockfish.top_lines",
+                    ],
+                }
+            ]
+        }
+        with self.assertRaisesRegex(
+            AIResponseError,
+            "exists only after Bb4",
+        ):
+            validate_explanations(payload, englund_pin_analysis())
+
+    def test_accepts_pin_attributed_to_opponent_reply_without_rewriting(self):
+        explanation = (
+            "Bc3 attacks the queen on b2, but it allows Black's reply Bb4. "
+            "Bb4 pins the bishop on c3 to the king on e1, so the bishop can no "
+            "longer chase the queen and the rook on a1 remains under pressure. "
+            "Nc3 was stronger because it develops the knight while helping the "
+            "queen on d1 defend the rook."
+        )
+        payload = {
+            "explanations": [
+                {
+                    "ply": 11,
+                    "move": "Bc3",
+                    "side": "white",
+                    "explanation": explanation,
+                    "lesson": (
+                        "Before attacking a queen, check whether a pin after the "
+                        "reply can make your attacking piece unable to move."
+                    ),
+                    "evidence_refs": [
+                        "decision_context",
+                        "stockfish.top_lines",
+                    ],
+                }
+            ]
+        }
+        result = validate_explanations(payload, englund_pin_analysis())
+        self.assertEqual(result[0]["explanation"], explanation)
+
+    def test_rejects_generic_lesson_when_tactical_focus_is_available(self):
+        payload = {
+            "explanations": [
+                {
+                    "ply": 11,
+                    "move": "Bc3",
+                    "side": "white",
+                    "explanation": (
+                        "Bc3 attacks the queen on b2, but it allows Black's "
+                        "reply Bb4. Bb4 pins the bishop on c3 to the king on e1, "
+                        "so the bishop cannot continue attacking the queen and "
+                        "the rook on a1 remains under pressure. Nc3 develops the "
+                        "knight and gives White a more useful defense."
+                    ),
+                    "lesson": "Always be aware of tactics.",
+                    "evidence_refs": ["decision_context"],
+                }
+            ]
+        }
+        with self.assertRaisesRegex(AIResponseError, "lesson was generic"):
+            validate_explanations(payload, englund_pin_analysis())
 
     def test_preserves_natural_sentence_count_with_word_ceiling(self):
         seven = valid_payload()
@@ -219,14 +387,11 @@ class AICoachValidationTests(unittest.TestCase):
                 for index in range(1, 18)
             ]
         )
-        oversized_result = validate_explanations(
-            oversized,
-            sample_analysis(),
-        )
-        self.assertLessEqual(
-            _word_count(oversized_result[0]["explanation"]),
-            180,
-        )
+        with self.assertRaisesRegex(
+            AIResponseError,
+            "readability limit",
+        ):
+            validate_explanations(oversized, sample_analysis())
 
     def test_response_schema_requires_one_structured_object_per_position(self):
         analysis = sample_analysis()
@@ -657,6 +822,43 @@ class AICoachValidationTests(unittest.TestCase):
         self.assertEqual(result["explanations"][0]["ply"], 1)
         self.assertEqual(generate.call_count, 2)
 
+    def test_generate_explanations_retries_invalid_coaching_response(self):
+        invalid = valid_payload()
+        invalid["explanations"][0]["explanation"] = (
+            "White plays e4, and under this review's thresholds Stockfish shows "
+            "20 centipawns of advantage. The move is acceptable because the "
+            "modeled winning-chance change stays small. Black can respond in "
+            "the center while White continues normal development."
+        )
+        generate = Mock(
+            side_effect=[
+                SimpleNamespace(text=__import__("json").dumps(invalid)),
+                SimpleNamespace(text=__import__("json").dumps(valid_payload())),
+            ]
+        )
+        fake_genai = SimpleNamespace(
+            Client=lambda **_kwargs: SimpleNamespace(
+                models=SimpleNamespace(generate_content=generate)
+            )
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GEMINI_API_KEY": "test-key",
+                    "GEMINI_PROVIDER_ATTEMPTS": "2",
+                },
+                clear=True,
+            ),
+            patch("backend.ai_coach._load_genai", return_value=fake_genai),
+        ):
+            result = generate_explanations(sample_analysis(), "white")
+
+        self.assertEqual(generate.call_count, 2)
+        retry_prompt = generate.call_args_list[1].kwargs["contents"]
+        self.assertIn("previous response failed validation", retry_prompt)
+        self.assertEqual(result["explanations"][0]["ply"], 1)
+
     def test_missing_key_and_malformed_json_are_explicit_failures(self):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(AIConfigurationError):
@@ -688,6 +890,188 @@ class AICoachValidationTests(unittest.TestCase):
             status = verify_gemini_connection()
         self.assertTrue(status["verified"])
         self.assertNotIn("test-key", str(status))
+
+    def test_briefing_surfaces_pin_with_timing_and_targets(self):
+        condensed = _condense_analysis(englund_pin_analysis())
+        briefing = _coaching_focus_briefing(condensed["positions"])
+        self.assertIn("TACTICAL BRIEFING", briefing)
+        self.assertIn("Bb4", briefing)
+        self.assertIn("c3", briefing)
+        self.assertIn("e1", briefing)
+        self.assertIn("AFTER Bb4", briefing)
+        self.assertIn("queen on b2", briefing)
+
+    def test_briefing_is_empty_when_no_tactical_focus(self):
+        condensed = _condense_analysis(sample_analysis())
+        briefing = _coaching_focus_briefing(condensed["positions"])
+        self.assertEqual(briefing, "")
+
+    def test_prompt_includes_briefing_for_englund_pin(self):
+        prompt = _build_prompt(englund_pin_analysis(), "white")
+        self.assertIn("TACTICAL BRIEFING", prompt)
+        self.assertIn("Bb4", prompt)
+        self.assertIn("AFTER Bb4", prompt)
+
+    def test_prompt_omits_briefing_section_when_no_tactical_focus(self):
+        prompt = _build_prompt(sample_analysis(), "both")
+        self.assertNotIn("TACTICAL BRIEFING", prompt)
+
+    def test_retry_prompt_names_briefing_when_coaching_was_generic(self):
+        generic_payload = {
+            "explanations": [
+                {
+                    "ply": 11,
+                    "move": "Bc3",
+                    "side": "white",
+                    "explanation": (
+                        "Bc3 attacks the queen but this is a blunder that allows "
+                        "Black to gain a decisive advantage through tactical play. "
+                        "The position becomes difficult for White who must now "
+                        "defend against multiple threats. Nc3 was the better "
+                        "choice that would have maintained equality for White."
+                    ),
+                    "lesson": "Always be aware of tactics.",
+                    "evidence_refs": ["decision_context"],
+                }
+            ]
+        }
+        generate = Mock(
+            side_effect=[
+                SimpleNamespace(
+                    text=__import__("json").dumps(generic_payload)
+                ),
+                SimpleNamespace(
+                    text=__import__("json").dumps(
+                        {
+                            "explanations": [
+                                {
+                                    "ply": 11,
+                                    "move": "Bc3",
+                                    "side": "white",
+                                    "explanation": (
+                                        "Bc3 attacks the queen on b2 but allows "
+                                        "Bb4 in reply. Bb4 pins the bishop on c3 "
+                                        "to the king on e1, so the bishop can no "
+                                        "longer chase the queen and the rook on a1 "
+                                        "remains under pressure. Nc3 was stronger."
+                                    ),
+                                    "lesson": (
+                                        "Before attacking a queen, check whether "
+                                        "the reply creates a pin that neutralizes "
+                                        "your attacking piece."
+                                    ),
+                                    "evidence_refs": ["decision_context"],
+                                }
+                            ]
+                        }
+                    )
+                ),
+            ]
+        )
+        fake_genai = SimpleNamespace(
+            Client=lambda **_kwargs: SimpleNamespace(
+                models=SimpleNamespace(generate_content=generate)
+            )
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GEMINI_API_KEY": "test-key",
+                    "GEMINI_PROVIDER_ATTEMPTS": "2",
+                },
+                clear=True,
+            ),
+            patch("backend.ai_coach._load_genai", return_value=fake_genai),
+        ):
+            result = generate_explanations(englund_pin_analysis(), "white")
+
+        self.assertEqual(generate.call_count, 2)
+        retry_prompt = generate.call_args_list[1].kwargs["contents"]
+        self.assertIn("TACTICAL BRIEFING", retry_prompt)
+        self.assertIn("coaching stayed generic", retry_prompt)
+        self.assertIn("exact squares and moves", retry_prompt)
+        self.assertIn("Bb4 pins the bishop on c3", result["explanations"][0]["explanation"])
+
+    def test_retry_prompt_names_timing_rule_on_chronology_error(self):
+        bad_chronology = {
+            "explanations": [
+                {
+                    "ply": 11,
+                    "move": "Bc3",
+                    "side": "white",
+                    "explanation": (
+                        "By moving the bishop to c3, White pins the bishop to "
+                        "the king on e1, creating a tactical weakness. Black "
+                        "then plays Bb4 and keeps pressure on the rook at a1. "
+                        "The better move was Nc3, which develops the knight and "
+                        "helps White coordinate the queenside."
+                    ),
+                    "lesson": (
+                        "When attacking a queen, check whether a pin to the king "
+                        "can make that attack unusable."
+                    ),
+                    "evidence_refs": ["decision_context"],
+                }
+            ]
+        }
+        generate = Mock(
+            side_effect=[
+                SimpleNamespace(
+                    text=__import__("json").dumps(bad_chronology)
+                ),
+                SimpleNamespace(
+                    text=__import__("json").dumps(
+                        {
+                            "explanations": [
+                                {
+                                    "ply": 11,
+                                    "move": "Bc3",
+                                    "side": "white",
+                                    "explanation": (
+                                        "Bc3 attacks the queen on b2 but allows "
+                                        "Bb4. Bb4 pins the bishop on c3 to the "
+                                        "king on e1; the bishop can no longer "
+                                        "chase the queen and pressure on the rook "
+                                        "on a1 continues. Nc3 develops the knight "
+                                        "and adds a defender via the queen on d1."
+                                    ),
+                                    "lesson": (
+                                        "Before attacking a queen, check whether "
+                                        "the reply creates a pin that neutralizes "
+                                        "your attacking piece."
+                                    ),
+                                    "evidence_refs": ["decision_context"],
+                                }
+                            ]
+                        }
+                    )
+                ),
+            ]
+        )
+        fake_genai = SimpleNamespace(
+            Client=lambda **_kwargs: SimpleNamespace(
+                models=SimpleNamespace(generate_content=generate)
+            )
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GEMINI_API_KEY": "test-key",
+                    "GEMINI_PROVIDER_ATTEMPTS": "2",
+                },
+                clear=True,
+            ),
+            patch("backend.ai_coach._load_genai", return_value=fake_genai),
+        ):
+            generate_explanations(englund_pin_analysis(), "white")
+
+        self.assertEqual(generate.call_count, 2)
+        retry_prompt = generate.call_args_list[1].kwargs["contents"]
+        self.assertIn("exists only after", retry_prompt)
+        self.assertIn("position_after_opponent_reply", retry_prompt)
+        self.assertIn("allows", retry_prompt)
 
 
 if __name__ == "__main__":
