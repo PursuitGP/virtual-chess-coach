@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 
-PROMPT_VERSION = "2026-06-21.9"
+PROMPT_VERSION = "2026-06-21.10"
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 VALID_PERSPECTIVES = {"white", "black", "both"}
 MAX_EXPLANATION_WORDS = 150
@@ -503,31 +503,35 @@ def _coaching_focus(position: dict[str, Any]) -> list[dict[str, Any]]:
         )
 
     engine_effects = decision.get("engine_choice_effects") or {}
-    useful_defenses = [
-        piece
-        for piece in (
-            engine_effects.get("newly_defended_friendly_pieces") or []
-        )
-        if piece.get("under_enemy_pressure")
-    ]
-    if engine_effects.get("move") and (
-        useful_defenses or engine_effects.get("develops_minor_piece")
-    ):
-        focus.append(
-            {
-                "type": "engine_alternative_board_effects",
-                "timing": "alternative_from_position_before_played_move",
-                "engine_move": engine_effects.get("move"),
-                "moved_piece": engine_effects.get("moved_piece"),
-                "develops_minor_piece": engine_effects.get(
-                    "develops_minor_piece"
-                ),
-                "newly_defended_friendly_pieces": useful_defenses[:3],
-                "newly_attacked_enemy_pieces": (
-                    engine_effects.get("newly_attacked_enemy_pieces") or []
-                )[:3],
-            }
-        )
+    classification = (decision.get("move_classification") or {}).get("label")
+    has_tactical_reason = bool(focus or classification in {"mistake", "blunder"})
+    if has_tactical_reason:
+        useful_defenses = [
+            piece
+            for piece in (
+                engine_effects.get("newly_defended_friendly_pieces") or []
+            )
+            if piece.get("under_enemy_pressure")
+            and piece.get("piece") in {"queen", "rook", "bishop", "knight"}
+        ]
+        if engine_effects.get("move") and (
+            useful_defenses or engine_effects.get("develops_minor_piece")
+        ):
+            focus.append(
+                {
+                    "type": "engine_alternative_board_effects",
+                    "timing": "alternative_from_position_before_played_move",
+                    "engine_move": engine_effects.get("move"),
+                    "moved_piece": engine_effects.get("moved_piece"),
+                    "develops_minor_piece": engine_effects.get(
+                        "develops_minor_piece"
+                    ),
+                    "newly_defended_friendly_pieces": useful_defenses[:3],
+                    "newly_attacked_enemy_pieces": (
+                        engine_effects.get("newly_attacked_enemy_pieces") or []
+                    )[:3],
+                }
+            )
     return focus
 
 
