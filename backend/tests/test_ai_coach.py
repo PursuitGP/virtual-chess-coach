@@ -588,6 +588,84 @@ class AICoachValidationTests(unittest.TestCase):
         self.assertNotIn("clear advantage", explanation)
         self.assertEqual(refs, set())
 
+    def test_grounding_removes_bad_label_praise(self):
+        position = {
+            "played_move": {"san": "Nxd5", "uci": "f6d5"},
+            "decision_context": {
+                "move_classification": {"label": "inaccuracy"},
+                "assessment_after": {
+                    "classification": "slight_edge",
+                    "leader": "white",
+                },
+            },
+            "motifs": [],
+        }
+        explanation, refs = _ground_explanation(
+            "Black recaptures on d5 with the knight, centralizing the piece "
+            "and challenging White's position. This move is a strong response, "
+            "as it centralizes the knight and prepares to defend against "
+            "White's threats. By recapturing, Black maintains the balance and "
+            "keeps the position complex. This move is a key part of the "
+            "tactical sequence and ensures Black's pieces are well-coordinated.",
+            position,
+        )
+
+        self.assertIn("inaccuracy", explanation)
+        self.assertNotIn("strong response", explanation)
+        self.assertNotIn("maintains the balance", explanation)
+        self.assertNotIn("well-coordinated", explanation)
+        self.assertEqual(refs, set())
+
+    def test_validate_rejects_bad_label_praise(self):
+        analysis = {
+            "analysis_id": "fried-liver-nxd5",
+            "positions": [
+                {
+                    "ply": 10,
+                    "side": "black",
+                    "played_move": {"san": "Nxd5", "uci": "f6d5"},
+                    "stockfish": {
+                        "evaluation": {"type": "cp", "value": 125},
+                        "top_lines": [{"moves_san": ["Nxd5"], "moves_uci": []}],
+                    },
+                    "decision_context": {
+                        "move_classification": {"label": "inaccuracy"},
+                        "assessment_after": {
+                            "classification": "slight_edge",
+                            "leader": "white",
+                        },
+                    },
+                    "motifs": [],
+                    "motifs_available": True,
+                    "lichess": {},
+                }
+            ],
+        }
+        payload = {
+            "explanations": [
+                {
+                    "ply": 10,
+                    "move": "Nxd5",
+                    "side": "black",
+                    "explanation": (
+                        "Black recaptures on d5 with the knight, centralizing "
+                        "the piece and challenging White's position. This move "
+                        "is a strong response, as it centralizes the knight and "
+                        "prepares to defend against White's threats. By "
+                        "recapturing, Black maintains the balance and keeps the "
+                        "position complex. This move is a key part of the "
+                        "tactical sequence and ensures Black's pieces are "
+                        "well-coordinated."
+                    ),
+                    "lesson": "Check whether a natural recapture solves the threat.",
+                    "evidence_refs": ["decision_context"],
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(AIResponseError, "praised a move"):
+            validate_explanations(payload, analysis)
+
     def test_grounding_explains_abandoned_mate_square_and_specific_lesson(self):
         position = {
             "played_move": {"san": "Qxc3", "uci": "d2c3"},

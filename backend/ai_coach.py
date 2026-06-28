@@ -10,10 +10,27 @@ import time
 from typing import Any
 
 
-PROMPT_VERSION = "2026-06-21.10"
+PROMPT_VERSION = "2026-06-27.1"
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 VALID_PERSPECTIVES = {"white", "black", "both"}
 MAX_EXPLANATION_WORDS = 150
+BAD_MOVE_LABELS = {"inaccuracy", "mistake", "blunder"}
+BAD_LABEL_PRAISE_RE = re.compile(
+    r"\b(?:"
+    r"strong (?:move|response|reply)|"
+    r"good (?:move|response|reply)|"
+    r"sound (?:move|response|reply|choice)|"
+    r"accurate (?:move|response|reply)|"
+    r"solid (?:move|response|reply|choice)|"
+    r"best (?:move|response|reply)|"
+    r"maintains? (?:the )?balance|"
+    r"keeps? (?:the )?(?:position )?(?:balanced|complex)|"
+    r"well[- ]coordinated|"
+    r"equaliz(?:es|ed|ing)|"
+    r"successfully (?:defends?|solves?|neutralizes?)"
+    r")\b",
+    re.I,
+)
 
 
 class AIConfigurationError(Exception):
@@ -309,6 +326,11 @@ def _required_coaching_points(position: dict[str, Any]) -> list[str]:
             f"Use the deterministic label {classification!r} at most once. Do "
             "not explain the classification thresholds, centipawn loss, or "
             "modeled winning-chance percentage in the coaching prose."
+        )
+        points.append(
+            "Do not praise this move as strong, sound, accurate, balanced, or "
+            "well-coordinated. If it looks natural, explain why that surface "
+            "idea fails tactically or positionally."
         )
     if decision.get("move_quality") == "allows_forced_mate":
         points.append(
@@ -752,6 +774,10 @@ Rules:
    it were the move the player should have chosen.
    move_classification is the sole authority for labels such as inaccuracy,
    mistake, and blunder. Never infer or upgrade one of those labels yourself.
+   When move_classification.label is inaccuracy, mistake, or blunder, do not
+   praise the move as strong, sound, accurate, balanced, well-coordinated, or
+   maintaining equality. You may say it looks natural only if you immediately
+   explain why that surface idea fails according to the evidence.
    move_effects identifies friendly pieces newly defended by the moved piece;
    do not call one of those pieces newly loose or vulnerable.
    reply_tactics identifies concrete consequences of the best or actual reply,
@@ -916,6 +942,40 @@ def _assessment_phrase(assessment: dict[str, Any]) -> str:
         "forced_mate": f"forced mate for {leader}",
     }
     return labels.get(classification, classification or "unclear")
+
+
+def _strip_bad_label_praise(
+    sentences: list[str],
+    classification: str | None,
+) -> list[str]:
+    if classification not in BAD_MOVE_LABELS:
+        return sentences
+
+    cleaned = [
+        sentence
+        for sentence in sentences
+        if not BAD_LABEL_PRAISE_RE.search(sentence)
+    ]
+    if not cleaned:
+        cleaned = [
+            (
+                f"This is an {classification}: the move does not solve the "
+                "concrete problem in the position."
+                if classification == "inaccuracy"
+                else f"This is a {classification}: the move does not solve the "
+                "concrete problem in the position."
+            )
+        ]
+
+    combined = " ".join(cleaned).lower()
+    if classification not in combined:
+        prefix = (
+            f"This is an {classification}."
+            if classification == "inaccuracy"
+            else f"This is a {classification}."
+        )
+        cleaned.insert(0, prefix)
+    return cleaned
 
 
 def _select_tactical_reply(decision: dict[str, Any]) -> dict[str, Any]:
@@ -1140,6 +1200,7 @@ def _ground_explanation(
                 )
                 for sentence in sentences
             ]
+        sentences = _strip_bad_label_praise(sentences, classification)
         explanation_lower = " ".join(sentences).lower()
     else:
         explanation_lower = " ".join(sentences).lower()
@@ -1569,6 +1630,13 @@ def _validate_explanation_content(
 ) -> None:
     lower = explanation.lower()
     decision = position.get("decision_context") or {}
+    classification = (decision.get("move_classification") or {}).get("label")
+
+    if classification in BAD_MOVE_LABELS and BAD_LABEL_PRAISE_RE.search(lower):
+        raise AIResponseError(
+            f"Coaching praised a move that deterministic analysis labels "
+            f"{classification}."
+        )
 
     if re.search(
         r"\b(?:centipawn|modeled winning-chance|win probability|"
@@ -1841,6 +1909,13 @@ def generate_explanations(
                     " you must include the specific pieces, squares, reply move,"
                     " and timing stated there. Do not summarise them in general"
                     " terms — name the exact squares and moves."
+                )
+            elif "praised a move" in error_text:
+                supplement = (
+                    "For any move labeled inaccuracy, mistake, or blunder, do not "
+                    "call the move strong, sound, accurate, balanced, or "
+                    "well-coordinated. Explain the natural surface idea only if "
+                    "you immediately state why it fails according to the evidence."
                 )
             elif "exists only after" in error_text:
                 supplement = (
