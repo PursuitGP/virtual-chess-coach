@@ -495,6 +495,12 @@ def _coaching_focus(position: dict[str, Any]) -> list[dict[str, Any]]:
                     "square": pin.get("square"),
                 },
                 "king_square": pin.get("king"),
+                "pinning_piece": pin.get("pinning_piece"),
+                "anchor_piece": pin.get("anchor_piece"),
+                "ray": pin.get("ray"),
+                "legal_along_ray_moves": pin.get("legal_along_ray_moves")
+                or [],
+                "disabled_functions": pin.get("disabled_functions") or {},
                 "targets_attacked_before_pin": pin.get(
                     "attacked_enemy_pieces_before_pin"
                 )

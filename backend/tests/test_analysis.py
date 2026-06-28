@@ -411,6 +411,11 @@ class AnalysisTests(unittest.TestCase):
             {key: pin[key] for key in ("piece", "square", "king")},
             {"piece": "bishop", "square": "c3", "king": "e1"},
         )
+        self.assertEqual(pin["pin_type"], "absolute")
+        self.assertEqual(pin["pinning_piece"]["square"], "b4")
+        self.assertEqual(pin["anchor_piece"]["square"], "e1")
+        self.assertEqual(pin["ray"], ["b4", "c3", "d2", "e1"])
+        self.assertEqual(pin["evidence_status"], "created_by_reply")
         queen = next(
             target
             for target in pin["attacked_enemy_pieces_before_pin"]

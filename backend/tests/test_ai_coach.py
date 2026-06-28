@@ -13,6 +13,7 @@ from backend.ai_coach import (
     _condense_analysis,
     _ground_explanation,
     _ground_lesson,
+    _motif_summary,
     _required_coaching_points,
     _response_json_schema,
     _word_count,
@@ -900,6 +901,63 @@ class AICoachValidationTests(unittest.TestCase):
         self.assertIn("e1", briefing)
         self.assertIn("AFTER Bb4", briefing)
         self.assertIn("queen on b2", briefing)
+
+    def test_condensed_reply_pin_preserves_enriched_evidence(self):
+        analysis = englund_pin_analysis()
+        pin = analysis["positions"][0]["decision_context"]["reply_tactics"][
+            "best_reply"
+        ]["new_absolute_pins"][0]
+        pin.update(
+            {
+                "pinning_piece": {
+                    "piece": "bishop",
+                    "square": "b4",
+                    "color": "black",
+                },
+                "anchor_piece": {
+                    "piece": "king",
+                    "square": "e1",
+                    "color": "white",
+                },
+                "ray": ["b4", "c3", "d2", "e1"],
+                "legal_along_ray_moves": [],
+            }
+        )
+        condensed = _condense_analysis(analysis)
+        focus = next(
+            item
+            for item in condensed["positions"][0]["coaching_focus"]
+            if item["type"] == "absolute_pin_created_by_opponent_reply"
+        )
+
+        self.assertEqual(focus["pinning_piece"]["square"], "b4")
+        self.assertEqual(focus["anchor_piece"]["square"], "e1")
+        self.assertEqual(focus["ray"], ["b4", "c3", "d2", "e1"])
+
+    def test_motif_summary_preserves_enriched_extra(self):
+        extra = {
+            "definition": "A fork attacks multiple valuable targets.",
+            "forking_piece": {"piece": "knight", "square": "f7"},
+            "targets": [
+                {"piece": "queen", "square": "d8"},
+                {"piece": "rook", "square": "h8"},
+            ],
+            "includes_check": False,
+        }
+        summary = _motif_summary(
+            [
+                {
+                    "id": "fork",
+                    "name": "Fork",
+                    "side": "white",
+                    "severity": "tactical",
+                    "confidence": "medium",
+                    "extra": extra,
+                }
+            ]
+        )
+
+        self.assertEqual(summary[0]["extra"], extra)
 
     def test_briefing_is_empty_when_no_tactical_focus(self):
         condensed = _condense_analysis(sample_analysis())

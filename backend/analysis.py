@@ -20,14 +20,28 @@ import chess.pgn
 import requests
 
 try:
-    from .motifs import MOTIF_CONFIDENCE, detect_motifs, publish_motifs
+    from .motifs import (
+        EX_ABSOLUTE_PIN,
+        MOTIF_CONFIDENCE,
+        build_pin_evidence,
+        detect_motifs,
+        pinning_piece_for_absolute_pin,
+        publish_motifs,
+    )
     from .study_database import (
         StudyDatabaseError,
         context_for_position,
         study_database_status,
     )
 except ImportError:
-    from motifs import MOTIF_CONFIDENCE, detect_motifs, publish_motifs
+    from motifs import (
+        EX_ABSOLUTE_PIN,
+        MOTIF_CONFIDENCE,
+        build_pin_evidence,
+        detect_motifs,
+        pinning_piece_for_absolute_pin,
+        publish_motifs,
+    )
     from study_database import (
         StudyDatabaseError,
         context_for_position,
@@ -721,14 +735,46 @@ def _reply_effects(
             ][:6]
             attacked_enemy_pieces.append(target_details)
 
-        newly_pinned.append(
+        king_square = after_reply.king(mover_color)
+        pinning_square = (
+            pinning_piece_for_absolute_pin(
+                after_reply,
+                mover_color,
+                square,
+                king_square,
+            )
+            if king_square is not None
+            else None
+        )
+        if pinning_square is not None and king_square is not None:
+            pin_evidence = build_pin_evidence(
+                after_reply,
+                pin_type="absolute",
+                pinning_sq=pinning_square,
+                pinned_sq=square,
+                anchor_sq=king_square,
+                defending_color=mover_color,
+                definition=EX_ABSOLUTE_PIN,
+                prev_board=current,
+                last_move_uci=reply.uci(),
+                status="created_by_reply",
+                disabled_before=attacked_enemy_pieces[:4],
+            )
+        else:
+            pin_evidence = {}
+        pin_evidence.update(
             {
                 "piece": chess.piece_name(piece.piece_type),
                 "square": chess.square_name(square),
-                "king": chess.square_name(after_reply.king(mover_color)),
+                "king": (
+                    chess.square_name(king_square)
+                    if king_square is not None
+                    else None
+                ),
                 "attacked_enemy_pieces_before_pin": attacked_enemy_pieces[:4],
             }
         )
+        newly_pinned.append(pin_evidence)
 
     return {
         "move": {"uci": reply.uci(), "san": san},

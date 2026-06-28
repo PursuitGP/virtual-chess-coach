@@ -42,6 +42,52 @@ MOTIF_CONFIDENCE = {
 }
 MAX_PUBLISHED_MOTIFS = 12
 
+# Planning roadmap for hardening the older motif list. This does not publish a
+# detector by itself; MOTIF_CONFIDENCE remains the runtime publication gate.
+MOTIF_ROADMAP_PHASES = {
+    "phase_1_tactical_concrete": [
+        "absolute_pin",
+        "relative_pin",
+        "fork",
+        "skewer",
+        "discovered_attack",
+        "double_check",
+        "attraction",
+        "f2_f7_weakness",
+        "c2_c7_weakness",
+        "diagonal_pressure",
+        "forced_mate",
+    ],
+    "phase_2_reliable_structural": [
+        "isolated_pawn",
+        "doubled_pawns",
+        "passed_pawn",
+        "pawn_majority",
+        "bishop_pair",
+        "open_file_control",
+        "semi_open_file",
+        "development_lead",
+    ],
+    "phase_3_engine_assisted": [
+        "piece_sacrifice",
+        "deflection",
+        "clearance_sacrifice",
+        "intermezzo",
+        "threatened_mate_net",
+        "early_queen_exposure",
+        "connect_the_rooks",
+    ],
+    "phase_4_needs_semantics": [
+        "weak_square",
+        "bad_good_bishop",
+        "outpost",
+        "minority_attack_setup",
+        "opening_theory_deviance",
+        "never_push_f_pawn",
+        "hanging_piece",
+    ],
+}
+
 
 def publish_motifs(motifs, *, include_experimental=False):
     """Annotate, de-duplicate, and confidence-gate detector output."""
@@ -496,6 +542,332 @@ def piece_value(piece_type):
 
 def legal_moves_from(board, sq):
     return [m for m in board.legal_moves if m.from_square == sq]
+
+
+def piece_detail(board, square):
+    piece = board.piece_at(square)
+    if piece is None:
+        return None
+    return {
+        "piece": chess.piece_name(piece.piece_type),
+        "square": chess.square_name(square),
+        "color": side_name(piece.color),
+    }
+
+
+def move_detail(prev_board=None, move_uci=None):
+    if not move_uci:
+        return None
+    detail = {"uci": move_uci}
+    if prev_board is None:
+        return detail
+    try:
+        move = chess.Move.from_uci(move_uci)
+    except ValueError:
+        return detail
+    if move in prev_board.legal_moves:
+        detail["san"] = prev_board.san(move)
+    return detail
+
+
+def direction_between(start, end):
+    file_delta = chess.square_file(end) - chess.square_file(start)
+    rank_delta = chess.square_rank(end) - chess.square_rank(start)
+    step_file = (file_delta > 0) - (file_delta < 0)
+    step_rank = (rank_delta > 0) - (rank_delta < 0)
+    if file_delta == 0 and rank_delta == 0:
+        return None
+    if file_delta == 0 or rank_delta == 0 or abs(file_delta) == abs(rank_delta):
+        return step_file, step_rank
+    return None
+
+
+def squares_between(start, end):
+    direction = direction_between(start, end)
+    if direction is None:
+        return []
+    step_file, step_rank = direction
+    file_idx = chess.square_file(start) + step_file
+    rank_idx = chess.square_rank(start) + step_rank
+    squares = []
+    while (file_idx, rank_idx) != (
+        chess.square_file(end),
+        chess.square_rank(end),
+    ):
+        squares.append(chess.square(file_idx, rank_idx))
+        file_idx += step_file
+        rank_idx += step_rank
+    return squares
+
+
+def ray_between(start, end):
+    if direction_between(start, end) is None:
+        return []
+    return [start, *squares_between(start, end), end]
+
+
+def square_names(squares):
+    return [chess.square_name(square) for square in squares]
+
+
+def slider_attacks_direction(piece_type, direction):
+    if direction is None:
+        return False
+    step_file, step_rank = direction
+    diagonal = step_file != 0 and step_rank != 0
+    straight = step_file == 0 or step_rank == 0
+    if piece_type == chess.QUEEN:
+        return True
+    if piece_type == chess.BISHOP:
+        return diagonal
+    if piece_type == chess.ROOK:
+        return straight
+    return False
+
+
+def aligned_slider_between(board, attacker_sq, anchor_sq):
+    piece = board.piece_at(attacker_sq)
+    if piece is None:
+        return False
+    return slider_attacks_direction(
+        piece.piece_type,
+        direction_between(attacker_sq, anchor_sq),
+    )
+
+
+def pinning_piece_for_absolute_pin(board, color, pinned_sq, king_sq):
+    direction = direction_between(king_sq, pinned_sq)
+    if direction is None:
+        return None
+    step_file, step_rank = direction
+    file_idx = chess.square_file(pinned_sq) + step_file
+    rank_idx = chess.square_rank(pinned_sq) + step_rank
+    while 0 <= file_idx < 8 and 0 <= rank_idx < 8:
+        square = chess.square(file_idx, rank_idx)
+        piece = board.piece_at(square)
+        if piece is None:
+            file_idx += step_file
+            rank_idx += step_rank
+            continue
+        if piece.color != color and aligned_slider_between(board, square, king_sq):
+            return square
+        return None
+    return None
+
+
+def legal_piece_moves(board, color, square):
+    trial = board.copy(stack=False)
+    trial.turn = color
+    return [move for move in trial.legal_moves if move.from_square == square]
+
+
+def pseudo_piece_moves(board, color, square):
+    trial = board.copy(stack=False)
+    trial.turn = color
+    return [move for move in trial.pseudo_legal_moves if move.from_square == square]
+
+
+def move_payloads(board, moves):
+    payloads = []
+    for move in moves:
+        payload = {
+            "uci": move.uci(),
+            "from": chess.square_name(move.from_square),
+            "to": chess.square_name(move.to_square),
+        }
+        try:
+            trial = board.copy(stack=False)
+            trial.turn = board.piece_at(move.from_square).color
+            if move in trial.legal_moves:
+                payload["san"] = trial.san(move)
+        except Exception:
+            pass
+        payloads.append(payload)
+    return payloads
+
+
+def attacked_piece_details(board, square, color):
+    details = []
+    for target in sorted(board.attacks(square)):
+        piece = board.piece_at(target)
+        if piece is None:
+            continue
+        if piece.color == color:
+            detail = piece_detail(board, target)
+            if detail:
+                details.append({**detail, "relationship": "defended"})
+        else:
+            detail = piece_detail(board, target)
+            if detail:
+                details.append({**detail, "relationship": "attacked"})
+    return details
+
+
+def build_pin_evidence(
+    board,
+    *,
+    pin_type,
+    pinning_sq,
+    pinned_sq,
+    anchor_sq,
+    defending_color,
+    definition,
+    prev_board=None,
+    last_move_uci=None,
+    status="present",
+    disabled_before=None,
+):
+    pinning_piece = piece_detail(board, pinning_sq)
+    pinned_piece = piece_detail(board, pinned_sq)
+    anchor_piece = piece_detail(board, anchor_sq)
+    ray = ray_between(pinning_sq, anchor_sq)
+    between_pinner_pinned = squares_between(pinning_sq, pinned_sq)
+    between_pinned_anchor = squares_between(pinned_sq, anchor_sq)
+    legal_moves = legal_piece_moves(board, defending_color, pinned_sq)
+    pseudo_moves = pseudo_piece_moves(board, defending_color, pinned_sq)
+    ray_set = set(ray)
+    legal_along_ray = [
+        move for move in legal_moves if move.to_square in ray_set
+    ]
+    legal_move_set = {move.uci() for move in legal_moves}
+    illegal_off_ray = [
+        move
+        for move in pseudo_moves
+        if move.to_square not in ray_set and move.uci() not in legal_move_set
+    ]
+    attacks = attacked_piece_details(board, pinned_sq, defending_color)
+    restricted_attacks = [
+        detail
+        for detail in attacks
+        if detail["relationship"] == "attacked"
+        and not any(
+            move.to_square == chess.parse_square(detail["square"])
+            for move in legal_moves
+        )
+    ]
+    can_capture_pinner = any(
+        move.to_square == pinning_sq for move in legal_moves
+    )
+    interpose_squares = set(between_pinner_pinned + between_pinned_anchor)
+    can_block_or_interpose = any(
+        move.to_square in interpose_squares for move in legal_moves
+    )
+    leave_line_status = (
+        "illegal_exposes_king"
+        if pin_type == "absolute"
+        else "legal_but_costly"
+    )
+    disabled_functions = {
+        "attacks_and_defenses": attacks,
+        "restricted_attacked_enemy_pieces": restricted_attacks,
+        "attacked_enemy_pieces_before_pin": disabled_before or [],
+    }
+    return {
+        "definition": definition,
+        "pin_type": pin_type,
+        "attacking_side": side_name(not defending_color),
+        "defending_side": side_name(defending_color),
+        "created_by": move_detail(prev_board, last_move_uci),
+        "evidence_status": status,
+        "pinning_piece": pinning_piece,
+        "pinned_piece_detail": pinned_piece,
+        "anchor_piece": anchor_piece,
+        "pieces": {
+            "pinning_piece": pinning_piece,
+            "pinned_piece": pinned_piece,
+            "anchor_piece": anchor_piece,
+        },
+        "targets": [anchor_piece] if anchor_piece else [],
+        "ray": square_names(ray),
+        "squares_between_pinner_and_pinned": square_names(
+            between_pinner_pinned
+        ),
+        "squares_between_pinned_and_anchor": square_names(
+            between_pinned_anchor
+        ),
+        "legal_along_ray_moves": move_payloads(board, legal_along_ray),
+        "illegal_off_ray_move_count": len(illegal_off_ray),
+        "illegal_off_ray_moves": move_payloads(board, illegal_off_ray[:6]),
+        "can_capture_pinner": can_capture_pinner,
+        "can_block_or_interpose": can_block_or_interpose,
+        "leave_line_status": leave_line_status,
+        "disabled_functions": disabled_functions,
+        "teaching_point": (
+            "The pinned piece cannot leave the line to its king."
+            if pin_type == "absolute"
+            else "Moving the pinned piece can expose a more valuable piece."
+        ),
+    }
+
+
+def build_fork_extra(
+    board,
+    *,
+    color,
+    forking_sq,
+    target_squares,
+    definition,
+    prev_board=None,
+    last_move_uci=None,
+):
+    forking_piece = piece_detail(board, forking_sq)
+    targets = [
+        piece_detail(board, target)
+        for target in sorted(target_squares)
+        if piece_detail(board, target)
+    ]
+    targets = [target for target in targets if target]
+    forcing_target = next(
+        (target for target in targets if target["piece"] == "king"),
+        None,
+    )
+    material_targets = [
+        target for target in targets if target["piece"] != "king"
+    ]
+    threatened_next_captures = [
+        {
+            "target": target,
+            "capture_square": target["square"],
+        }
+        for target in material_targets
+    ]
+    return {
+        "definition": definition,
+        "attacking_side": side_name(color),
+        "defending_side": side_name(not color),
+        "created_by": move_detail(prev_board, last_move_uci),
+        "evidence_status": "present",
+        "forking_piece": {
+            "piece": forking_piece["piece"],
+            "square": forking_piece["square"],
+        } if forking_piece else None,
+        "pieces": {"forking_piece": forking_piece},
+        "targets": [
+            {"piece": target["piece"], "square": target["square"]}
+            for target in targets
+        ],
+        "includes_check": forcing_target is not None,
+        "forcing_target": (
+            {
+                "piece": forcing_target["piece"],
+                "square": forcing_target["square"],
+            }
+            if forcing_target
+            else None
+        ),
+        "material_targets": [
+            {"piece": target["piece"], "square": target["square"]}
+            for target in material_targets
+        ],
+        "threatened_next_captures": threatened_next_captures,
+        "must_answer_check": forcing_target is not None,
+        "from": chess.square_name(forking_sq),
+        "teaching_point": (
+            "A checking fork forces the king response before material can be saved."
+            if forcing_target
+            else "One piece attacks multiple valuable targets at once."
+        ),
+    }
 
 # -------------------------
 # Motif implementations
@@ -957,6 +1329,8 @@ def hanging_piece(
 def fork(board, move_number, eval_cp, prev_eval=None, **kwargs):
     eval_delta = compute_eval_delta(prev_eval, eval_cp)
     motifs = []
+    prev_board = kwargs.get("prev_board")
+    last_move_uci = kwargs.get("last_move_uci")
     # Simple: knight forks only (most common & easy)
     for color in [chess.WHITE, chess.BLACK]:
         enemy = not color
@@ -967,18 +1341,30 @@ def fork(board, move_number, eval_cp, prev_eval=None, **kwargs):
             for t in attacks:
                 p = board.piece_at(t)
                 if p and p.color == enemy and p.piece_type in (chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT, chess.KING):
-                    targets.append(p.piece_type)
+                    targets.append(t)
             if len(targets) >= 2:
+                extra = build_fork_extra(
+                    board,
+                    color=color,
+                    forking_sq=sq,
+                    target_squares=targets,
+                    definition=EX_FORK,
+                    prev_board=prev_board,
+                    last_move_uci=last_move_uci,
+                )
                 motifs.append(
                     make_motif(
                         "fork",
                         "Fork",
-                        EX_FORK,
+                        (
+                            f"The knight on {chess.square_name(sq)} attacks "
+                            "multiple valuable targets at once."
+                        ),
                         side=side_name(color),
                         severity="tactical",
                         eval_cp=eval_cp,
                         eval_delta_cp=eval_delta,
-                        extra={"from": sq}
+                        extra=extra,
                     )
                 )
     return motifs
@@ -1042,6 +1428,8 @@ def knight_on_rim(board, move_number, eval_cp, prev_eval=None, **kwargs):
 def f2_f7_weakness(board, move_number, eval_cp, prev_eval=None, **kwargs):
     eval_delta = compute_eval_delta(prev_eval, eval_cp)
     motifs = []
+    prev_board = kwargs.get("prev_board")
+    last_move_uci = kwargs.get("last_move_uci")
     # f2/f7 squares
     sq_white = chess.F2
     sq_black = chess.F7
@@ -1100,9 +1488,34 @@ def f2_f7_weakness(board, move_number, eval_cp, prev_eval=None, **kwargs):
                 f"{'' if len(defender_details) == 1 else 's'}."
             )
             extra = {
+                "definition": EX_F2_F7,
                 "target_square": target_square,
+                "target_pawn": {
+                    "piece": "pawn",
+                    "square": target_square,
+                    "color": side_name(color),
+                },
+                "target_occupied": True,
                 "attackers": attacker_details,
                 "defenders": defender_details,
+                "attacking_side": side_name(enemy),
+                "defending_side": side_name(color),
+                "created_by": move_detail(prev_board, last_move_uci),
+                "evidence_status": "threatened",
+                "pieces": {
+                    "attackers": attacker_details,
+                    "defenders": defender_details,
+                    "target_pawn": {
+                        "piece": "pawn",
+                        "square": target_square,
+                        "color": side_name(color),
+                    },
+                },
+                "targets": [{"piece": "pawn", "square": target_square}],
+                "teaching_point": (
+                    f"The pressure on {target_square} is concrete because a "
+                    "knight capture can become a fork."
+                ),
             }
 
             for attacker, piece in attacker_pieces:
@@ -1137,6 +1550,11 @@ def f2_f7_weakness(board, move_number, eval_cp, prev_eval=None, **kwargs):
                     )
                     extra["threat_move_san"] = threat_move_san
                     extra["fork_targets"] = fork_targets
+                    extra["candidate_follow_up"] = {
+                        "move_san": threat_move_san,
+                        "motif": "fork",
+                        "targets": fork_targets,
+                    }
                     explanation += (
                         f" The threatened {threat_move_san} capture would fork "
                         f"the {target_text}."
@@ -1153,6 +1571,7 @@ def f2_f7_weakness(board, move_number, eval_cp, prev_eval=None, **kwargs):
                     eval_cp=eval_cp,
                     eval_delta_cp=eval_delta,
                     extra=extra,
+                    status="threatened",
                 )
             )
     return motifs
@@ -2004,10 +2423,50 @@ def attraction(
             eval_cp=eval_cp,
             eval_delta_cp=compute_eval_delta(prev_eval, eval_cp),
             extra={
+                "definition": EX_ATTRACTION,
                 "king_square": chess.square_name(k_to),
+                "king_from": chess.square_name(k_from),
+                "king_to": chess.square_name(k_to),
                 "sacrificed_piece": chess.piece_name(sac_piece.piece_type),
                 "sacrifice_square": chess.square_name(prev_to),
+                "captured_piece": {
+                    "piece": chess.piece_name(sac_piece.piece_type),
+                    "square": chess.square_name(prev_to),
+                    "color": side_name(enemy_color),
+                },
+                "attracted_piece": {
+                    "piece": "king",
+                    "from": chess.square_name(k_from),
+                    "to": chess.square_name(k_to),
+                    "color": side_name(king_color),
+                },
+                "lure_move": move_detail(prev_board, prev_move_uci),
+                "capture_move": move_detail(prev_board, last_move_uci),
+                "created_by": move_detail(prev_board, last_move_uci),
+                "attacking_side": side_name(enemy_color),
+                "defending_side": side_name(king_color),
+                "is_king_attraction": True,
+                "follow_up_motif_links": [],
+                "evidence_status": "played",
+                "pieces": {
+                    "attracted_piece": {
+                        "piece": "king",
+                        "square": chess.square_name(k_to),
+                        "color": side_name(king_color),
+                    },
+                    "sacrificed_piece": {
+                        "piece": chess.piece_name(sac_piece.piece_type),
+                        "square": chess.square_name(prev_to),
+                        "color": side_name(enemy_color),
+                    },
+                },
+                "targets": [{"piece": "king", "square": chess.square_name(k_to)}],
+                "teaching_point": (
+                    "The sacrifice pulled the king onto a square where forcing "
+                    "moves can follow."
+                ),
             },
+            status="played",
         )
     )
 
@@ -2825,6 +3284,7 @@ def bishop_diagonal_pressure(
     """
 
     motifs = []
+    last_move_uci = kwargs.get("last_move_uci")
 
     # Must have a previous board to compare
     if prev_board is None:
@@ -2860,6 +3320,22 @@ def bishop_diagonal_pressure(
 
                     # If we hit ANY of our critical squares → motif
                     if target in critical_squares:
+                        ray = ray_between(sq, target)
+                        between = squares_between(sq, target)
+                        blockers = [
+                            piece_detail(board, block_sq)
+                            for block_sq in between
+                            if board.piece_at(block_sq)
+                        ]
+                        blockers = [blocker for blocker in blockers if blocker]
+                        target_piece = piece_detail(board, target)
+                        if target in (chess.F7, chess.F2):
+                            target_category = "f_pawn_weakness"
+                        elif target in (chess.G1, chess.G8):
+                            target_category = "castling_zone"
+                        else:
+                            target_category = "kingside_structure"
+                        direct_pressure = not blockers
                         motifs.append(
                             make_motif(
                                 "diagonal_pressure",
@@ -2870,8 +3346,52 @@ def bishop_diagonal_pressure(
                                 eval_cp=eval_cp,
                                 eval_delta_cp=compute_eval_delta(prev_eval, eval_cp),
                                 extra={
+                                    "definition": (
+                                        "Diagonal pressure occurs when a bishop "
+                                        "or queen controls an important diagonal "
+                                        "toward the king, castling zone, or a "
+                                        "known weak square."
+                                    ),
                                     "bishop": chess.square_name(sq),
                                     "target": chess.square_name(target),
+                                    "attacking_side": side_name(color),
+                                    "defending_side": side_name(enemy),
+                                    "created_by": move_detail(
+                                        prev_board,
+                                        last_move_uci,
+                                    ),
+                                    "evidence_status": "present",
+                                    "pieces": {
+                                        "attacking_piece": piece_detail(board, sq),
+                                        "target_piece": target_piece,
+                                    },
+                                    "targets": [
+                                        {
+                                            "square": chess.square_name(target),
+                                            "category": target_category,
+                                            "piece": (
+                                                target_piece["piece"]
+                                                if target_piece
+                                                else None
+                                            ),
+                                        }
+                                    ],
+                                    "ray": square_names(ray),
+                                    "blockers": blockers,
+                                    "target_category": target_category,
+                                    "direct_pressure": direct_pressure,
+                                    "pressure_type": (
+                                        "direct"
+                                        if direct_pressure
+                                        else "thematic"
+                                    ),
+                                    "teaching_point": (
+                                        "The bishop's diagonal gives concrete "
+                                        f"pressure on {chess.square_name(target)}."
+                                        if direct_pressure
+                                        else "The bishop is aimed at an important "
+                                        "diagonal but pieces still block the line."
+                                    ),
                                 },
                             )
                         )
@@ -3119,6 +3639,7 @@ def absolute_pin(
     move_number,
     eval_cp,
     prev_eval=None,
+    last_move_uci=None,
     **_,
 ):
     motifs = []
@@ -3135,6 +3656,32 @@ def absolute_pin(
                 continue
 
             if board.is_pinned(color, sq):
+                pinning_sq = pinning_piece_for_absolute_pin(
+                    board,
+                    color,
+                    sq,
+                    king_sq,
+                )
+                if pinning_sq is None:
+                    continue
+                pin_extra = build_pin_evidence(
+                    board,
+                    pin_type="absolute",
+                    pinning_sq=pinning_sq,
+                    pinned_sq=sq,
+                    anchor_sq=king_sq,
+                    defending_color=color,
+                    definition=EX_ABSOLUTE_PIN,
+                    prev_board=prev_board,
+                    last_move_uci=last_move_uci,
+                    status="present",
+                )
+                pin_extra.update(
+                    {
+                        "pinned_piece": chess.square_name(sq),
+                        "king": chess.square_name(king_sq),
+                    }
+                )
                 motifs.append(
                     make_motif(
                         "absolute_pin",
@@ -3144,10 +3691,7 @@ def absolute_pin(
                         severity="tactical",
                         eval_cp=eval_cp,
                         eval_delta_cp=eval_delta,
-                        extra={
-                            "pinned_piece": chess.square_name(sq),
-                            "king": chess.square_name(king_sq),
-                        },
+                        extra=pin_extra,
                     )
                 )
 
@@ -3163,6 +3707,7 @@ def relative_pin(
     move_number,
     eval_cp,
     prev_eval=None,
+    last_move_uci=None,
     **_,
 ):
     motifs = []
@@ -3221,6 +3766,25 @@ def relative_pin(
                     # must be pinned to a more valuable piece (not king)
                     if behind_piece.piece_type != chess.KING and \
                        piece_value(behind_piece.piece_type) > piece_value(block_piece.piece_type):
+                        pin_extra = build_pin_evidence(
+                            board,
+                            pin_type="relative",
+                            pinning_sq=sq,
+                            pinned_sq=block_sq,
+                            anchor_sq=behind_sq,
+                            defending_color=own_color,
+                            definition=EX_RELATIVE_PIN,
+                            prev_board=prev_board,
+                            last_move_uci=last_move_uci,
+                            status="present",
+                        )
+                        pin_extra.update(
+                            {
+                                "pinned_piece": chess.square_name(block_sq),
+                                "valuable_piece": chess.square_name(behind_sq),
+                                "attacker": chess.square_name(sq),
+                            }
+                        )
 
                         motifs.append(
                             make_motif(
@@ -3231,11 +3795,7 @@ def relative_pin(
                                 severity="info",
                                 eval_cp=eval_cp,
                                 eval_delta_cp=eval_delta,
-                                extra={
-                                    "pinned_piece": chess.square_name(block_sq),
-                                    "valuable_piece": chess.square_name(behind_sq),
-                                    "attacker": chess.square_name(sq),
-                                },
+                                extra=pin_extra,
                             )
                         )
 
@@ -3247,6 +3807,7 @@ def fork_general(
     move_number,
     eval_cp,
     prev_eval=None,
+    last_move_uci=None,
     **_,
 ):
     """
@@ -3271,7 +3832,7 @@ def fork_general(
 
             attacks = board.attacks(sq)
 
-            targets = []
+            target_squares = []
 
             for t in attacks:
                 p = board.piece_at(t)
@@ -3284,15 +3845,15 @@ def fork_general(
                     chess.ROOK,
                     chess.BISHOP,
                     chess.KNIGHT,
-                ):
-                    targets.append(
-                        {
-                            "piece": chess.piece_name(p.piece_type),
-                            "square": chess.square_name(t),
-                        }
-                    )
+                    ):
+                    target_squares.append(t)
 
             # Fork conditions
+            targets = [
+                piece_detail(board, target)
+                for target in target_squares
+                if piece_detail(board, target)
+            ]
             king_attacked = any(
                 target["piece"] == "king" for target in targets
             )
@@ -3309,6 +3870,15 @@ def fork_general(
                     f"the {target['piece']} on {target['square']}"
                     for target in targets
                 )
+                extra = build_fork_extra(
+                    board,
+                    color=color,
+                    forking_sq=sq,
+                    target_squares=target_squares,
+                    definition=EX_FORK,
+                    prev_board=prev_board,
+                    last_move_uci=last_move_uci,
+                )
                 motifs.append(
                     make_motif(
                         "fork",
@@ -3323,14 +3893,7 @@ def fork_general(
                         severity="tactical",
                         eval_cp=eval_cp,
                         eval_delta_cp=eval_delta,
-                        extra={
-                            "forking_piece": {
-                                "piece": attacker_name,
-                                "square": attacker_square,
-                            },
-                            "targets": targets,
-                            "includes_check": king_attacked,
-                        },
+                        extra=extra,
                     )
                 )
 
@@ -3455,6 +4018,44 @@ def detect_motifs(
         ]
         n = abs(mate_val)
         is_checkmate = n == 0 and board.is_checkmate()
+        checkers = sorted(board.checkers()) if board.is_check() else []
+        checking_pieces = [
+            piece_detail(board, checker)
+            for checker in checkers
+            if piece_detail(board, checker)
+        ]
+        occupied_escape_squares = [
+            square
+            for square, status in square_status.items()
+            if status["status"] == "friendly_occupied"
+        ]
+        defense_board = board.copy(stack=False)
+        defense_board.turn = defending_color
+        legal_replies = list(defense_board.legal_moves)
+        checker_set = set(checkers)
+        block_squares = set()
+        if defending_king_square is not None:
+            for checker in checkers:
+                checker_piece = board.piece_at(checker)
+                if checker_piece and slider_attacks_direction(
+                    checker_piece.piece_type,
+                    direction_between(checker, defending_king_square),
+                ):
+                    block_squares.update(
+                        squares_between(checker, defending_king_square)
+                    )
+        can_capture_checker = any(
+            move.to_square in checker_set for move in legal_replies
+        )
+        can_block_check = any(
+            move.to_square in block_squares for move in legal_replies
+        )
+        legal_king_moves = [
+            move
+            for move in legal_replies
+            if defending_king_square is not None
+            and move.from_square == defending_king_square
+        ]
         king_description = (
             f"The defending king on "
             f"{chess.square_name(defending_king_square)} has "
@@ -3482,17 +4083,77 @@ def detect_motifs(
                 eval_cp=eval_cp,
                 eval_delta_cp=compute_eval_delta(prev_eval, eval_cp),
                 extra={
+                    "definition": (
+                        "Forced mate means the defending king cannot avoid "
+                        "checkmate with best play."
+                    ),
+                    "attacking_side": side,
+                    "defending_side": side_name(defending_color),
+                    "created_by": move_detail(prev_board, last_uci),
+                    "evidence_status": (
+                        "played" if is_checkmate else "present"
+                    ),
                     "defending_king_square": (
                         chess.square_name(defending_king_square)
                         if defending_king_square is not None
                         else None
                     ),
+                    "checking_piece": (
+                        {
+                            "piece": checking_pieces[0]["piece"],
+                            "square": checking_pieces[0]["square"],
+                        }
+                        if checking_pieces
+                        else None
+                    ),
+                    "checking_pieces": checking_pieces,
                     "safe_adjacent_squares": safe_squares,
                     "safe_adjacent_square_count": len(safe_squares),
                     "adjacent_square_status": square_status,
+                    "occupied_escape_squares": occupied_escape_squares,
+                    "can_capture_checker": can_capture_checker,
+                    "can_block_check": can_block_check,
+                    "legal_king_escape_moves": move_payloads(
+                        defense_board,
+                        legal_king_moves,
+                    ),
+                    "pieces": {
+                        "checking_pieces": checking_pieces,
+                        "defending_king": (
+                            {
+                                "piece": "king",
+                                "square": chess.square_name(
+                                    defending_king_square
+                                ),
+                                "color": side_name(defending_color),
+                            }
+                            if defending_king_square is not None
+                            else None
+                        ),
+                    },
+                    "targets": (
+                        [
+                            {
+                                "piece": "king",
+                                "square": chess.square_name(
+                                    defending_king_square
+                                ),
+                            }
+                        ]
+                        if defending_king_square is not None
+                        else []
+                    ),
                     "mate_line_uci": sf_raw.get("pv") or [],
                     "mate_line_san": sf_raw.get("pv_san") or [],
+                    "teaching_point": (
+                        "The king has no safe escape, capture, or block "
+                        "available in the mating position."
+                        if is_checkmate
+                        else "The supplied engine line shows how the king "
+                        "is forced toward mate."
+                    ),
                 },
+                status="played" if is_checkmate else "present",
             )
         )
         return publish_motifs(

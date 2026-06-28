@@ -15,6 +15,12 @@ FRIED_LIVER = (
     "5. exd5 Nxd5 6. Nxf7 Kxf7 7. Qf3+ Kg8 *"
 )
 
+FRIED_LIVER_FULL = (
+    "1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 d5 "
+    "5. exd5 Nxd5 6. Nxf7 Kxf7 7. Qf3+ Kg8 "
+    "8. Qxd5+ Qxd5 9. Bxd5+ Be6 10. Bxe6# *"
+)
+
 
 def add_engine_fixtures(records, *, mark_last_mate=False):
     evaluations = [
@@ -50,6 +56,30 @@ def add_engine_fixtures(records, *, mark_last_mate=False):
                 "pawns": None,
                 "display": "M3",
             },
+            "top_lines": [{"moves_uci": [], "moves_san": []}],
+        }
+
+
+def add_neutral_engine_fixtures(records):
+    for record in records:
+        board = chess.Board(record["fen"])
+        if board.is_checkmate():
+            evaluation = {
+                "type": "mate",
+                "value": 0,
+                "winner": "white" if board.turn == chess.BLACK else "black",
+                "pawns": None,
+                "display": "#",
+            }
+        else:
+            evaluation = {
+                "type": "cp",
+                "value": 0,
+                "pawns": 0,
+                "display": "+0.00",
+            }
+        record["stockfish"] = {
+            "evaluation": evaluation,
             "top_lines": [{"moves_uci": [], "moves_san": []}],
         }
 
@@ -144,6 +174,151 @@ class MotifConfidenceTests(unittest.TestCase):
             forced_mate["extra"]["adjacent_square_status"]["h7"]["status"],
             "friendly_occupied",
         )
+
+    def test_full_fried_liver_emits_structured_evidence(self):
+        game = chess.pgn.read_game(io.StringIO(FRIED_LIVER_FULL))
+        records, _total = _position_records(game, max_plies=30)
+        add_neutral_engine_fixtures(records)
+        warnings = []
+        add_motif_evidence(records, warnings)
+        by_ply = {
+            record["ply"]: {motif["id"] for motif in record["motifs"]}
+            for record in records
+        }
+
+        self.assertIn("diagonal_pressure", by_ply[5])
+        self.assertIn("f2_f7_weakness", by_ply[7])
+        self.assertIn("fork", by_ply[11])
+        self.assertIn("attraction", by_ply[12])
+        self.assertIn("absolute_pin", by_ply[12])
+        self.assertIn("fork", by_ply[13])
+        self.assertIn("fork", by_ply[15])
+        self.assertIn("fork", by_ply[17])
+        self.assertIn("absolute_pin", by_ply[18])
+        self.assertEqual(by_ply[19], {"forced_mate"})
+
+        diagonal = next(
+            motif
+            for motif in records[4]["motifs"]
+            if motif["id"] == "diagonal_pressure"
+        )
+        self.assertEqual(diagonal["extra"]["ray"], ["c4", "d5", "e6", "f7"])
+        self.assertEqual(diagonal["extra"]["pressure_type"], "direct")
+
+        f7 = next(
+            motif
+            for motif in records[6]["motifs"]
+            if motif["id"] == "f2_f7_weakness"
+        )
+        self.assertEqual(f7["status"], "threatened")
+        self.assertEqual(f7["extra"]["target_pawn"]["square"], "f7")
+        self.assertEqual(f7["extra"]["candidate_follow_up"]["motif"], "fork")
+
+        knight_fork = next(
+            motif
+            for motif in records[10]["motifs"]
+            if motif["id"] == "fork"
+        )
+        self.assertEqual(
+            knight_fork["extra"]["forking_piece"],
+            {"piece": "knight", "square": "f7"},
+        )
+        self.assertEqual(
+            {target["square"] for target in knight_fork["extra"]["targets"]},
+            {"d8", "h8"},
+        )
+        self.assertNotIsInstance(knight_fork["extra"]["from"], int)
+
+        pin = next(
+            motif
+            for motif in records[11]["motifs"]
+            if motif["id"] == "absolute_pin"
+        )
+        self.assertEqual(pin["extra"]["pin_type"], "absolute")
+        self.assertEqual(pin["extra"]["pinning_piece"]["square"], "c4")
+        self.assertEqual(pin["extra"]["anchor_piece"]["square"], "f7")
+        self.assertEqual(pin["extra"]["ray"], ["c4", "d5", "e6", "f7"])
+        self.assertGreater(pin["extra"]["illegal_off_ray_move_count"], 0)
+
+        attraction = next(
+            motif
+            for motif in records[11]["motifs"]
+            if motif["id"] == "attraction"
+        )
+        self.assertEqual(attraction["extra"]["king_from"], "e8")
+        self.assertEqual(attraction["extra"]["king_to"], "f7")
+        self.assertTrue(attraction["extra"]["is_king_attraction"])
+
+        mate = records[-1]["motifs"][0]
+        self.assertEqual(mate["id"], "forced_mate")
+        self.assertEqual(mate["status"], "played")
+        self.assertEqual(mate["extra"]["checking_piece"]["square"], "e6")
+        self.assertFalse(mate["extra"]["can_capture_checker"])
+        self.assertFalse(mate["extra"]["can_block_check"])
+
+    def test_absolute_pin_keeps_same_ray_mobility_detail(self):
+        board = chess.Board("k3r3/8/8/8/8/8/4Q3/4K3 w - - 0 1")
+        motifs = detect_motifs(
+            board=board,
+            prev_board=board.copy(stack=False),
+            move_number=1,
+            eval_cp=0,
+            prev_eval=0,
+            include_experimental=True,
+        )
+        pin = next(motif for motif in motifs if motif["id"] == "absolute_pin")
+
+        self.assertEqual(pin["side"], "white")
+        self.assertEqual(pin["extra"]["pinning_piece"]["square"], "e8")
+        self.assertEqual(pin["extra"]["pinned_piece_detail"]["square"], "e2")
+        self.assertEqual(pin["extra"]["anchor_piece"]["square"], "e1")
+        self.assertEqual(pin["extra"]["pin_type"], "absolute")
+        self.assertEqual(pin["extra"]["leave_line_status"], "illegal_exposes_king")
+        self.assertTrue(pin["extra"]["legal_along_ray_moves"])
+        self.assertNotIn("relative_pin", {motif["id"] for motif in motifs})
+
+    def test_blocked_bishop_does_not_publish_diagonal_pressure(self):
+        previous = chess.Board(
+            "rnbqkbnr/ppp2ppp/8/3pp3/4P3/8/PPPP1PPP/RNBQKBNR "
+            "w KQkq - 0 3"
+        )
+        board = previous.copy()
+        board.push_uci("f1c4")
+        motifs = detect_motifs(
+            board=board,
+            prev_board=previous,
+            move_number=5,
+            eval_cp=0,
+            prev_eval=0,
+            last_move_uci="f1c4",
+        )
+        self.assertNotIn("diagonal_pressure", {motif["id"] for motif in motifs})
+
+    def test_non_sacrificial_king_capture_is_not_attraction(self):
+        previous = chess.Board("4k3/5N2/8/8/8/8/8/4K3 b - - 0 1")
+        board = previous.copy()
+        board.push_uci("e8f7")
+        motifs = detect_motifs(
+            board=board,
+            prev_board=previous,
+            move_number=1,
+            eval_cp=0,
+            prev_eval=0,
+            last_move_uci="e8f7",
+            prev_move_uci="a2a3",
+        )
+        self.assertNotIn("attraction", {motif["id"] for motif in motifs})
+
+    def test_single_target_attack_is_not_a_fork(self):
+        board = chess.Board("k7/8/8/5q2/3N4/8/8/4K3 w - - 0 1")
+        motifs = detect_motifs(
+            board=board,
+            prev_board=board.copy(stack=False),
+            move_number=1,
+            eval_cp=0,
+            prev_eval=0,
+        )
+        self.assertNotIn("fork", {motif["id"] for motif in motifs})
 
     def test_experimental_hanging_detector_is_suppressed(self):
         game = chess.pgn.read_game(io.StringIO("1. e4 e5 2. Nf3 *"))
